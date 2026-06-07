@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: bro-know-my-spark-analyzer
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            asset_os: windows
+            arch: x64
+          - runner: ubuntu-latest
+            asset_os: linux
+            arch: x64
+          - runner: macos-13
+            asset_os: macos
+            arch: x64
+          - runner: macos-latest
+            asset_os: macos
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf \
+            rpm \
+            wget
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync version from tag
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $script = @'
+          const fs = require("fs");
+          const version = process.env.VERSION;
+
+          for (const file of ["package.json", "src-tauri/tauri.conf.json"]) {
+            const json = JSON.parse(fs.readFileSync(file, "utf8"));
+            json.version = version;
+            fs.writeFileSync(file, JSON.stringify(json, null, 2) + "\n");
+          }
+
+          const cargo = "src-tauri/Cargo.toml";
+          const text = fs
+            .readFileSync(cargo, "utf8")
+            .replace(/^(version\s*=\s*")[^"]+(")/m, `$1${version}$2`);
+          fs.writeFileSync(cargo, text);
+          '@
+          node -e $script
+
+      - name: Build Tauri bundles
+        run: pnpm tauri build
+
+      - name: Rename release assets
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ASSET_OS: ${{ matrix.asset_os }}
+          ARCH: ${{ matrix.arch }}
+          APP_NAME: ${{ env.APP_NAME }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $prefix = "$env:APP_NAME-$env:VERSION-$env:ASSET_OS-$env:ARCH"
+
+          if ($env:ASSET_OS -eq "windows") {
+            Copy-Item -LiteralPath "src-tauri/target/release/bro-know-my-spark-analyzer.exe" -Destination "release-assets/$prefix-portable.exe"
+            $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+            if (-not $setup) { throw "NSIS setup exe was not produced" }
+            Copy-Item -LiteralPath $setup.FullName -Destination "release-assets/$prefix-setup.exe"
+            $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
+            if (-not $msi) { throw "MSI was not produced" }
+            Copy-Item -LiteralPath $msi.FullName -Destination "release-assets/$prefix.msi"
+          } elseif ($env:ASSET_OS -eq "linux") {
+            $appimage = Get-ChildItem "src-tauri/target/release/bundle/appimage" -Filter "*.AppImage" | Select-Object -First 1
+            if (-not $appimage) { throw "AppImage was not produced" }
+            Copy-Item -LiteralPath $appimage.FullName -Destination "release-assets/$prefix.appimage"
+            $deb = Get-ChildItem "src-tauri/target/release/bundle/deb" -Filter "*.deb" | Select-Object -First 1
+            if (-not $deb) { throw "deb package was not produced" }
+            Copy-Item -LiteralPath $deb.FullName -Destination "release-assets/$prefix.deb"
+            $rpm = Get-ChildItem "src-tauri/target/release/bundle/rpm" -Filter "*.rpm" | Select-Object -First 1
+            if (-not $rpm) { throw "rpm package was not produced" }
+            Copy-Item -LiteralPath $rpm.FullName -Destination "release-assets/$prefix.rpm"
+          } elseif ($env:ASSET_OS -eq "macos") {
+            $dmg = Get-ChildItem "src-tauri/target/release/bundle/dmg" -Filter "*.dmg" | Select-Object -First 1
+            if (-not $dmg) { throw "dmg was not produced" }
+            Copy-Item -LiteralPath $dmg.FullName -Destination "release-assets/$prefix.dmg"
+          }
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.asset_os }}-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: BroKnowMySparkAnalyzer ${{ steps.version.outputs.version }}
+          files: release-assets/*
+          generate_release_notes: true
