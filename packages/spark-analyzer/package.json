@@ -1,0 +1,55 @@
+{
+  "name": "@bro-know-my/spark-analyzer",
+  "version": "0.1.0",
+  "description": "Reusable Vue Spark report analyzer view for BroKnowMy apps.",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/style.css"
+  ],
+  "keywords": [
+    "spark",
+    "analyzer",
+    "vue",
+    "tauri"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./style.css": "./dist/style.css"
+  },
+  "scripts": {
+    "build": "vite build && vue-tsc -p tsconfig.json --declaration --emitDeclarationOnly",
+    "pack:dry": "npm pack --dry-run",
+    "prepublishOnly": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@vicons/fa": "^0.13.0",
+    "@vicons/fluent": "^0.13.0",
+    "naive-ui": "^2.43.0",
+    "vue": "^3.5.0"
+  },
+  "dependencies": {
+    "html-to-image": "^1.11.13",
+    "marked": "^16.4.1",
+    "protobufjs": "^7.5.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.4",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vue-tsc": "^2.2.12"
+  }
+}
