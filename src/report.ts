@@ -135,6 +135,7 @@ export function executeReportTool(
         availableTools: reportToolDescriptions(),
         availableData: {
           overview: true,
+          environment: hasReportEnvironment(report.raw),
           hotspots: Boolean(report.summary.topHotspots?.length),
           hotspotGroups: Boolean(report.summary.topHotspots?.length),
           modSources: hasSourceMaps(report.raw),
@@ -149,6 +150,8 @@ export function executeReportTool(
           rawField: report.kind !== "text",
         },
       };
+    case "environment":
+      return summarizeEnvironment(report);
     case "overview":
       return {
         source: report.source,
@@ -222,6 +225,7 @@ export function executeReportTool(
 export function reportToolDescriptions() {
   return [
     { name: "overview", args: {}, description: "关键指标、本地阈值发现、GC 摘要" },
+    { name: "environment", args: {}, description: "报告内记录的平台、系统、Java/JVM、服务器配置和来源清单" },
     { name: "hotspots", args: { limit: 16 }, description: "CPU profile 热点帧" },
     { name: "hotspot_groups", args: { limit: 20 }, description: "按类别、包名、线程聚合 CPU 热点，降低框架帧噪声" },
     { name: "hot_paths", args: { category: "auto", limit: 24 }, description: "自动选择高占比热点类别并向下展开子路径，定位具体类和功能帧" },
@@ -875,6 +879,107 @@ function summarizeMemoryGc(report: ReportDocument) {
     gcCollectors,
     signals,
     interpretation: memoryGcInterpretation(signals),
+  };
+}
+
+function summarizeEnvironment(report: ReportDocument) {
+  if (report.kind === "text") {
+    return {
+      available: false,
+      note: "文本输入没有 spark protobuf metadata，无法读取报告内运行环境。",
+    };
+  }
+
+  const metadata = report.raw.metadata ?? {};
+  const platform = metadata.platformMetadata ?? {};
+  const system = metadata.systemStatistics ?? {};
+  const cpu = system.cpu ?? {};
+  const memory = system.memory ?? {};
+  const os = system.os ?? {};
+  const java = system.java ?? {};
+  const jvm = system.jvm ?? {};
+  const disk = system.disk ?? {};
+  const serverConfigurations = metadata.serverConfigurations ?? {};
+  const extraPlatformMetadata = metadata.extraPlatformMetadata ?? {};
+  const sources = metadata.sources ?? {};
+  const sourceEntries = Object.entries(sources)
+    .map(([id, value]) => {
+      const source = value as AnyRecord;
+      return {
+        id,
+        name: source.name ?? id,
+        version: source.version,
+        author: source.author,
+        builtin: Boolean(source.builtin),
+      };
+    })
+    .sort((left, right) => {
+      if (left.builtin !== right.builtin) return left.builtin ? 1 : -1;
+      return String(left.name).localeCompare(String(right.name));
+    });
+
+  return {
+    available: true,
+    source: "spark report metadata",
+    platform: compactObject({
+      type: platform.type,
+      name: platform.name,
+      version: platform.version,
+      minecraftVersion: platform.minecraftVersion,
+      sparkVersion: platform.sparkVersion,
+      brand: platform.brand,
+    }),
+    os: compactObject({
+      name: os.name,
+      version: os.version,
+      arch: os.arch,
+    }),
+    java: compactObject({
+      vendor: java.vendor,
+      version: java.version,
+      vendorVersion: java.vendorVersion,
+      vmArgs: summarizeVmArgs(java.vmArgs),
+    }),
+    jvm: compactObject({
+      name: jvm.name,
+      vendor: jvm.vendor,
+      version: jvm.version,
+    }),
+    cpu: compactObject({
+      modelName: cpu.modelName,
+      threads: cpu.threads,
+      processUsage1m: cpu.processUsage?.last1m,
+      processUsage15m: cpu.processUsage?.last15m,
+      systemUsage1m: cpu.systemUsage?.last1m,
+      systemUsage15m: cpu.systemUsage?.last15m,
+    }),
+    physicalMemory: memoryPoolEnvironment(memory.physical),
+    swapMemory: memoryPoolEnvironment(memory.swap),
+    disk: compactObject({
+      used: disk.used,
+      total: disk.total,
+      usedFormatted: formatBytes(disk.used),
+      totalFormatted: formatBytes(disk.total),
+      usedRatio: ratio(Number(disk.used ?? 0), Number(disk.total ?? 0)),
+    }),
+    uptime: compactObject({
+      millis: system.uptime,
+      formatted: formatDuration(system.uptime),
+    }),
+    networkInterfaceCount: Object.keys(system.net ?? {}).length,
+    gcCollectors: summarizeGc(system.gc),
+    serverConfigurations: topKeyValues(serverConfigurations, 48, 360),
+    extraPlatformMetadata: topKeyValues(extraPlatformMetadata, 48, 360),
+    sources: {
+      count: sourceEntries.length,
+      builtinCount: sourceEntries.filter((source) => source.builtin).length,
+      externalCount: sourceEntries.filter((source) => !source.builtin).length,
+      top: sourceEntries.slice(0, 80),
+    },
+    interpretation: [
+      "这些字段来自 spark 报告 metadata，只能作为运行环境、版本、配置和资源上下文。",
+      "它不能单独证明 TPS/MSPT 根因；根因仍需结合 hotspots/hot_paths/mod_sources/time windows/GC 等证据。",
+    ],
   };
 }
 
@@ -1659,6 +1764,17 @@ function hasSourceMaps(raw: AnyRecord) {
   );
 }
 
+function hasReportEnvironment(raw: AnyRecord) {
+  const metadata = raw.metadata ?? {};
+  return Boolean(
+    Object.keys(metadata.platformMetadata ?? {}).length ||
+    Object.keys(metadata.systemStatistics ?? {}).length ||
+    Object.keys(metadata.serverConfigurations ?? {}).length ||
+    Object.keys(metadata.extraPlatformMetadata ?? {}).length ||
+    Object.keys(metadata.sources ?? {}).length,
+  );
+}
+
 function resolveSourceId(
   frame: {
     className?: string;
@@ -1791,6 +1907,58 @@ function memoryUsageSummary(usage: AnyRecord) {
     maxFormatted: max > 0 ? formatBytes(max) : "-",
     usedCommittedRatio: ratio(used, committed),
     usedMaxRatio: ratio(used, effectiveMax),
+  };
+}
+
+function memoryPoolEnvironment(pool: AnyRecord | undefined) {
+  const used = Number(pool?.used ?? 0);
+  const total = Number(pool?.total ?? 0);
+  return compactObject({
+    used,
+    total,
+    usedFormatted: formatBytes(used),
+    totalFormatted: formatBytes(total),
+    usedRatio: ratio(used, total),
+  });
+}
+
+function summarizeVmArgs(value: unknown) {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  const args = text.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+  const important = args.filter((arg) =>
+    [
+      "-Xms",
+      "-Xmx",
+      "-XX:+Use",
+      "-XX:Max",
+      "-XX:G1",
+      "-XX:+AlwaysPreTouch",
+      "-XX:+DisableExplicitGC",
+      "-javaagent",
+    ].some((prefix) => arg.startsWith(prefix)),
+  );
+  return {
+    count: args.length,
+    important: important.slice(0, 32),
+  };
+}
+
+function topKeyValues(value: AnyRecord, limit: number, valueLimit = 360) {
+  return Object.entries(value ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(0, limit)
+    .map(([key, item]) => summarizeKeyValue(key, item, valueLimit));
+}
+
+function summarizeKeyValue(key: string, value: unknown, valueLimit: number) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  return {
+    key,
+    value: normalized.length > valueLimit ? `${normalized.slice(0, valueLimit)}...` : normalized,
+    truncated: normalized.length > valueLimit,
+    length: normalized.length,
   };
 }
 
@@ -1977,6 +2145,22 @@ function formatTimestamp(value: unknown) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return undefined;
   return new Date(number).toLocaleString();
+}
+
+function formatDuration(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return undefined;
+  const seconds = Math.round(number / 1000);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const restSeconds = seconds % 60;
+  return [
+    days ? `${days}d` : "",
+    hours ? `${hours}h` : "",
+    minutes ? `${minutes}m` : "",
+    restSeconds || (!days && !hours && !minutes) ? `${restSeconds}s` : "",
+  ].filter(Boolean).join(" ");
 }
 
 export function formatNumber(value: unknown) {

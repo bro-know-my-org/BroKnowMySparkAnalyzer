@@ -153,9 +153,11 @@ export async function runToolAgent(
         "如果证据不能唯一定位，不要伪装成确定；写“证据不足以唯一定位”，并说明还需要补采哪种 spark profile。",
         "当你需要数据时，只输出一个 JSON 对象，不要包裹 markdown：",
         '{"tool":"overview","args":{}}',
-        "可用工具: report_inventory, overview, hotspots, hotspot_groups, hot_paths, mod_sources, time_windows, worst_windows, entities, entity_chunks, heap, memory_gc, diagnostic_hypotheses, evidence_gaps, raw_field。",
+        "可用工具: report_inventory, overview, environment, hotspots, hotspot_groups, hot_paths, mod_sources, time_windows, worst_windows, entities, entity_chunks, heap, memory_gc, diagnostic_hypotheses, evidence_gaps, raw_field。",
         `最终回答前必须至少查完这些工具: ${requiredTools.join(", ")}。`,
         "diagnostic_hypotheses 是本地规则生成的候选结论；evidence_gaps 会告诉你当前报告不能证明什么。",
+        "environment 是报告内 metadata/system statistics/source list，不是本机信息采集。它只能作为平台、版本、Java/JVM、服务器配置、资源上下文，不能单独证明 TPS/MSPT 根因。",
+        "证据一致性硬规则：metadata.sources 只能证明报告记录了这些 mod/plugin；只有 mod_sources/hot_paths 把 CPU 帧解析到该来源时，才能把该来源写进性能热点证据。",
         "hot_paths 默认使用 category:auto：先根据 hotspot_groups 自动选择高占比且可下钻的类别，再分别展开具体子帧。最终回答必须引用 hot_paths 的自动下钻结果，而不是停在聚合入口。",
         "hot_paths 会返回 frames 和 callChains；最终结论优先使用 callChains，因为 frames 是扁平排序，可能把 Neruina/Observable/Mixin 包装层或通用库帧放到前面。",
         "证据一致性硬规则：TPS/MSPT 主因只能优先引用 Server thread 证据。LDLib Async Thread、Netty、Worker 等后台线程可作为并发/同步压力说明，但不能直接当主线程 tick 根因。",
@@ -391,13 +393,14 @@ function updateEvidenceState(
 
 function requiredToolsForReport(report: ReportDocument) {
   if (report.kind === "heap") {
-    return ["overview", "heap", "evidence_gaps", "diagnostic_hypotheses"];
+    return ["overview", "environment", "heap", "evidence_gaps", "diagnostic_hypotheses"];
   }
   if (report.kind === "text") {
     return ["overview", "evidence_gaps"];
   }
   return [
     "overview",
+    "environment",
     "hotspot_groups",
     "hot_paths",
     "worst_windows",

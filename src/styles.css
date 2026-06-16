@@ -399,6 +399,67 @@ h2 {
   overflow: auto;
 }
 
+.environment-box {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+}
+
+.environment-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.environment-heading span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.environment-heading .n-text {
+  font-size: 11px;
+}
+
+.environment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+
+.environment-row {
+  min-width: 0;
+}
+
+.environment-row span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.environment-row strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 58px;
+  overflow: auto;
+}
+
 .trace-list {
   position: relative;
   display: flex;
