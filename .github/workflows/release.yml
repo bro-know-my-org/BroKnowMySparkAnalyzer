@@ -31,7 +31,7 @@ jobs:
           - runner: ubuntu-latest
             asset_os: linux
             arch: x64
-          - runner: macos-13
+          - runner: macos-15-intel
             asset_os: macos
             arch: x64
           - runner: macos-latest
