@@ -4,6 +4,11 @@
   "description": "Reusable Vue Spark report analyzer view for BroKnowMy apps.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer",
+    "directory": "packages/spark-analyzer"
+  },
   "publishConfig": {
     "access": "public"
   },
