@@ -503,7 +503,7 @@ function omitsSelectedHotPathCategory(
 
 function contentMentionsCategory(content: string, category: string) {
   const aliases: Record<string, string[]> = {
-    block_entity: ["block_entity", "BlockEntity", "方块实体", "方块实体 tick", "BlockEntityTicker", "BlockEntityTicker"],
+    block_entity: ["block_entity", "BlockEntity", "方块实体", "方块实体 tick", "BlockEntityTicker"],
     chunk_task: ["chunk_task", "区块任务", "区块加载", "ChunkMap", "ServerChunkCache"],
     entity_tick: ["entity_tick", "实体 tick", "实体tick", "EntityTickList"],
     commands: ["commands", "命令", "function", "CommandFunction"],
