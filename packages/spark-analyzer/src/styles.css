@@ -279,6 +279,13 @@ h2 {
   margin-bottom: 10px;
 }
 
+.panel-title-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
 .top-actions {
   flex: 0 1 auto;
   justify-content: flex-end;

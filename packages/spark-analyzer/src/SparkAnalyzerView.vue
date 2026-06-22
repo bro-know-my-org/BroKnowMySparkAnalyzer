@@ -73,7 +73,8 @@ type StatusKey =
   | "textLoaded"
   | "analyzing"
   | "done"
-  | "failed";
+  | "failed"
+  | "canceled";
 
 const copy = {
   zh: {
@@ -88,6 +89,7 @@ const copy = {
       analyzing: "Agent 分析中",
       done: "Agent 分析完成",
       failed: "Agent 分析失败",
+      canceled: "Agent 分析已中止",
     },
     ui: {
       subtitle: "Spark Agent Workbench",
@@ -103,7 +105,7 @@ const copy = {
       optionalTextInput: "可选：粘贴文本/日志",
       textPlaceholder: "粘贴日志或人工摘要",
       loadText: "载入文本",
-      aiTip: "OpenAI-compatible /chat/completions；测试不会保存 key。",
+      aiTip: "OpenAI-compatible /chat/completions；保存配置只写入本机 localStorage，不会上传云端。",
       advancedAi: "高级 AI 设置",
       temperature: "温度",
       temperatureTip: "越低越稳定；性能诊断建议保持 0.2。",
@@ -113,6 +115,8 @@ const copy = {
       modelPlaceholder: "选择或输入模型",
       test: "测试连通性",
       analyze: "Agent 分析",
+      stopAnalysis: "中止",
+      saveAiConfig: "保存配置",
       type: "类型",
       heap: "堆内存",
       entities: "实体",
@@ -157,6 +161,9 @@ const copy = {
       textRequired: "文本不能为空",
       loadReportFirst: "先载入报告",
       connected: "连通性正常",
+      aiConfigLoaded: "已载入本地 AI 配置",
+      aiConfigSaved: "AI 配置已保存到本地",
+      aiConfigSaveFailed: "保存 AI 配置失败",
       modelsLoaded: "模型列表已更新",
       modelFetchFailed: "获取模型失败",
       exported: "已导出",
@@ -176,6 +183,7 @@ const copy = {
       analyzing: "Agent analyzing",
       done: "Agent complete",
       failed: "Agent failed",
+      canceled: "Agent canceled",
     },
     ui: {
       subtitle: "Spark Agent Workbench",
@@ -191,7 +199,7 @@ const copy = {
       optionalTextInput: "Optional: paste text/logs",
       textPlaceholder: "Paste logs or manual notes",
       loadText: "Load Text",
-      aiTip: "OpenAI-compatible /chat/completions. Test does not save the key.",
+      aiTip: "OpenAI-compatible /chat/completions. Saved config stays in localStorage on this device and is not uploaded.",
       advancedAi: "Advanced AI Settings",
       temperature: "Temperature",
       temperatureTip: "Lower is more stable. 0.2 is recommended for diagnostics.",
@@ -201,6 +209,8 @@ const copy = {
       modelPlaceholder: "Select or type a model",
       test: "Test Connection",
       analyze: "Agent Analyze",
+      stopAnalysis: "Stop",
+      saveAiConfig: "Save Config",
       type: "Type",
       heap: "Heap",
       entities: "Entities",
@@ -245,6 +255,9 @@ const copy = {
       textRequired: "Text cannot be empty",
       loadReportFirst: "Load a report first",
       connected: "Connection OK",
+      aiConfigLoaded: "Local AI config loaded",
+      aiConfigSaved: "AI config saved locally",
+      aiConfigSaveFailed: "Failed to save AI config",
       modelsLoaded: "Model list updated",
       modelFetchFailed: "Failed to fetch models",
       exported: "Exported",
@@ -253,6 +266,8 @@ const copy = {
     },
   },
 } satisfies Record<Lang, any>;
+
+const AI_CONFIG_STORAGE_KEY = "bro-know-my-spark-analyzer.ai-config.v1";
 
 const { message } = createDiscreteApi(["message"], {
   configProviderProps: {
@@ -267,6 +282,7 @@ const dragging = ref(false);
 const aiOutput = ref("");
 const traces = ref<AgentTrace[]>([]);
 const busy = ref(false);
+const analysisRunId = ref(0);
 const fetchingReport = ref(false);
 const testing = ref(false);
 const fetchingModels = ref(false);
@@ -315,6 +331,7 @@ function releaseAltPressed() {
 }
 
 onMounted(() => {
+  loadLocalAiConfig();
   document.addEventListener("contextmenu", preventNativeContextMenu);
   window.addEventListener("keydown", updateAltPressed);
   window.addEventListener("keyup", updateAltPressed);
@@ -536,6 +553,8 @@ async function runAnalysis() {
     message.warning(t.value.msg.loadReportFirst);
     return;
   }
+  const runId = analysisRunId.value + 1;
+  analysisRunId.value = runId;
   busy.value = true;
   traces.value = [];
   aiOutput.value = "";
@@ -544,16 +563,64 @@ async function runAnalysis() {
   statusKey.value = "analyzing";
   try {
     const final = await runToolAgent(report.value, currentConfig(), (trace) => {
+      if (analysisRunId.value !== runId) return;
       traces.value.push(trace);
     }, props.adapter);
+    if (analysisRunId.value !== runId) return;
     aiOutput.value = final;
     statusKey.value = "done";
   } catch (error) {
+    if (analysisRunId.value !== runId) return;
     aiOutput.value = `## 分析失败\n\n${String(error)}`;
     statusKey.value = "failed";
   } finally {
-    busy.value = false;
+    if (analysisRunId.value === runId) {
+      busy.value = false;
+    }
   }
+}
+
+function loadLocalAiConfig() {
+  try {
+    const raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw) as Partial<AiConfig> & { providerId?: string };
+    if (saved.providerId && providerPresets.some((preset) => preset.id === saved.providerId)) {
+      providerId.value = saved.providerId;
+    }
+    if (typeof saved.base_url === "string") baseUrl.value = saved.base_url;
+    if (typeof saved.api_key === "string") apiKey.value = saved.api_key;
+    if (typeof saved.model === "string") model.value = saved.model;
+    if (typeof saved.temperature === "number" && Number.isFinite(saved.temperature)) {
+      temperature.value = saved.temperature;
+    }
+    message.success(t.value.msg.aiConfigLoaded);
+  } catch {
+    window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
+  }
+}
+
+function saveLocalAiConfig() {
+  try {
+    window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
+      providerId: providerId.value,
+      base_url: baseUrl.value.trim(),
+      api_key: apiKey.value.trim(),
+      model: model.value.trim(),
+      temperature: Number(temperature.value ?? 0.2),
+    }));
+    message.success(t.value.msg.aiConfigSaved);
+  } catch (error) {
+    message.error(`${t.value.msg.aiConfigSaveFailed}: ${String(error)}`);
+  }
+}
+
+function stopAnalysis() {
+  if (!busy.value) return;
+  analysisRunId.value += 1;
+  busy.value = false;
+  statusKey.value = "canceled";
+  aiOutput.value = "## 分析已中止\n\n当前请求若稍后返回，其结果会被忽略。";
 }
 
 async function sendFollowUp() {
@@ -581,6 +648,7 @@ async function sendFollowUp() {
 }
 
 function clearAll() {
+  if (busy.value) stopAnalysis();
   report.value = null;
   sourceInput.value = "";
   textInput.value = "";
@@ -605,15 +673,19 @@ async function exportMarkdown() {
     message.warning(t.value.msg.noDiagnosis);
     return;
   }
-  const source = report.value?.source ? `\n\n---\nsource: ${report.value.source}\n` : "";
-  const environment = environmentMarkdown();
-  const path = await props.adapter.pickSavePath({
-    defaultPath: `${exportBaseName()}.md`,
-    filters: [{ name: "Markdown", extensions: ["md"] }],
-  });
-  if (!path) return;
-  await props.adapter.saveExportFile(path, stringToBase64(`${markdown}${environment}${source}`));
-  message.success(`${t.value.msg.exported} ${path}`);
+  try {
+    const source = report.value?.source ? `\n\n---\nsource: ${report.value.source}\n` : "";
+    const environment = environmentMarkdown();
+    const path = await props.adapter.pickSavePath({
+      defaultPath: `${exportBaseName()}.md`,
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
+    if (!path) return;
+    await props.adapter.saveExportFile(path, stringToBase64(`${markdown}${environment}${source}`));
+    message.success(`${t.value.msg.exported} ${path}`);
+  } catch (error) {
+    message.error(`${t.value.msg.exportFailed}: ${String(error)}`);
+  }
 }
 
 function environmentMarkdown() {
@@ -633,6 +705,11 @@ async function exportDiagnosisImage() {
     message.warning(t.value.msg.noDiagnosis);
     return;
   }
+  const path = await props.adapter.pickSavePath({
+    defaultPath: `${exportBaseName()}.png`,
+    filters: [{ name: "PNG Image", extensions: ["png"] }],
+  });
+  if (!path) return;
   const exportNode = document.createElement("section");
   exportNode.className = `markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
   exportNode.innerHTML = renderedMarkdown.value;
@@ -643,11 +720,6 @@ async function exportDiagnosisImage() {
       pixelRatio: 2,
       backgroundColor: themeMode.value === "dark" ? "#10161b" : "#f8fafb",
     });
-    const path = await props.adapter.pickSavePath({
-      defaultPath: `${exportBaseName()}.png`,
-      filters: [{ name: "PNG Image", extensions: ["png"] }],
-    });
-    if (!path) return;
     await props.adapter.saveExportFile(path, dataUrlToBase64(dataUrl));
     message.success(`${t.value.msg.exported} ${path}`);
   } catch (error) {
@@ -767,6 +839,18 @@ function traceSummary(trace: AgentTrace) {
     return `${language.value === "zh" ? "热点类别" : "Categories"}: ${(parsed.byCategory ?? []).slice(0, 4).map((item: any) => `${categoryDisplayName(item.category)} ${formatNumber(item.maxPercent)}%`).join(" · ")}`;
   }
   if (tool === "hot_paths") {
+    const entities = parsed.attribution?.entityCandidates ?? [];
+    if (entities.length) {
+      return `${language.value === "zh" ? "实体/生物候选" : "Entity candidates"}: ${entities.slice(0, 4).map((item: any) => `${item.entityId} ${formatNumber(item.percent)}% ${item.sourceName ?? item.sourceId}`).join(" · ")}`;
+    }
+    const dominant = (parsed.attribution?.byCategory ?? []).flatMap((item: any) => (item.dominantPaths ?? []).map((path: any) => ({ ...path, category: item.category })));
+    if (dominant.length) {
+      return `${language.value === "zh" ? "火焰图主分支" : "Dominant flame paths"}: ${dominant.slice(0, 4).map((item: any) => `${item.category} ${formatNumber(item.terminalPercent)}% ${shortClassName(item.terminal?.label)}`).join(" · ")}`;
+    }
+    const chains = parsed.callChains ?? [];
+    if (chains.length) {
+      return `${language.value === "zh" ? "下钻终点" : "Drilled terminals"}: ${chains.slice(0, 4).map((item: any) => `${item.terminalSourceName ?? item.terminalSourceId} ${formatNumber(item.terminalPercent)}% ${shortClassName(item.terminalLabel)}`).join(" · ")}`;
+    }
     return `${language.value === "zh" ? "热点子路径" : "Hot paths"}: ${(parsed.frames ?? []).slice(0, 4).map((item: any) => `${item.role ?? "frame"} ${formatNumber(item.maxPercent)}% ${shortClassName(item.className ?? item.label)}`).join(" · ")}`;
   }
   if (tool === "mod_sources") {
@@ -1038,7 +1122,10 @@ const InfoTip = (props: { text: string }) =>
             <section class="panel resizable-panel">
               <div class="panel-title">
                 <h2>{{ t.ui.report }}</h2>
-                <component :is="InfoTip" :text="t.ui.reportTip" />
+                <div class="panel-title-actions">
+                  <n-button size="small" secondary @click="clearAll">{{ t.ui.clear }}</n-button>
+                  <component :is="InfoTip" :text="t.ui.reportTip" />
+                </div>
               </div>
 
               <label
@@ -1086,7 +1173,10 @@ const InfoTip = (props: { text: string }) =>
             <section class="panel resizable-panel mt-16">
               <div class="panel-title">
                 <h2>AI</h2>
-                <component :is="InfoTip" :text="t.ui.aiTip" />
+                <div class="panel-title-actions">
+                  <n-button size="small" secondary @click="saveLocalAiConfig">{{ t.ui.saveAiConfig }}</n-button>
+                  <component :is="InfoTip" :text="t.ui.aiTip" />
+                </div>
               </div>
               <n-select :value="providerId" :options="providerOptions" @update:value="applyProvider" />
               <n-input v-model:value="baseUrl" class="mt-10" :placeholder="t.ui.baseUrlPlaceholder" />
@@ -1114,6 +1204,9 @@ const InfoTip = (props: { text: string }) =>
                 <n-button :loading="testing" secondary @click="testAi">{{ t.ui.test }}</n-button>
                 <n-button type="primary" :loading="busy" :disabled="!canAnalyze" @click="runAnalysis">
                   {{ t.ui.analyze }}
+                </n-button>
+                <n-button secondary type="warning" :disabled="!busy" @click="stopAnalysis">
+                  {{ t.ui.stopAnalysis }}
                 </n-button>
               </n-space>
             </section>
@@ -1164,7 +1257,6 @@ const InfoTip = (props: { text: string }) =>
               <div class="panel resizable-panel status-panel">
                 <div class="panel-title compact">
                   <h2>{{ t.ui.reportStatus }}</h2>
-                  <n-button size="small" secondary @click="clearAll">{{ t.ui.clear }}</n-button>
                 </div>
                 <n-text depth="3">{{ report?.source ?? t.ui.noReport }}</n-text>
                 <div v-if="reportEnvironment?.available" class="environment-box mt-12">
