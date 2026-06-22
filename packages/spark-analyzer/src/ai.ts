@@ -126,6 +126,9 @@ export async function runToolAgent(
   const evidenceState = {
     modSourcesResolved: false,
     modSourcesNames: [] as string[],
+    hotPathSourcesResolved: false,
+    hotPathSourceNames: [] as string[],
+    hotPathEntityCandidates: [] as string[],
     entityChunkNames: [] as string[],
     hotPathText: "",
     selectedHotPathCategories: [] as string[],
@@ -156,7 +159,10 @@ export async function runToolAgent(
         "environment 是报告内 metadata/system statistics/source list，不是本机信息采集。它只能作为平台、版本、Java/JVM、服务器配置、资源上下文，不能单独证明 TPS/MSPT 根因。",
         "证据一致性硬规则：metadata.sources 只能证明报告记录了这些 mod/plugin；只有 mod_sources/hot_paths 把 CPU 帧解析到该来源时，才能把该来源写进性能热点证据。",
         "hot_paths 默认使用 category:auto：先根据 hotspot_groups 自动选择高占比且可下钻的类别，再分别展开具体子帧。最终回答必须引用 hot_paths 的自动下钻结果，而不是停在聚合入口。",
-        "hot_paths 会返回 frames 和 callChains；最终结论优先使用 callChains，因为 frames 是扁平排序，可能把 Neruina/Observable/Mixin 包装层或通用库帧放到前面。",
+        "hot_paths 会返回 dominantPaths、frames、callChains 和 attribution；最终结论必须先用 dominantPaths 说明火焰图最大子块逐层钻入结果，再用 attribution.topSources / attribution.entityCandidates 做模组/实体归因。",
+        "证据优先级硬规则：hot_paths.attribution.topSources 和 hot_paths.callChains 的 terminalSource 是一等性能归因证据。mod_sources 是补充视角；如果 mod_sources 没把某个 terminal source 汇总到 topSources，不能据此否定 hot_paths 已经解析出的终端模组/实体类。",
+        "下钻完整性硬规则：hot_paths.attribution.byCategory 必须逐个解释 selectedCategories。不能只写全局 topSources；entity_tick、chunk_task、block_entity/world_tick 等高占用类别要分别列出 dominantPaths 钻入链路和 terminal classes/sources/entities。",
+        "证据表达硬规则：hot_paths.attribution.topSources 里的非 wrapper source 必须列为“强候选/优先排查对象”；entityCandidates 必须列成具体实体/生物候选。可以说它们不是唯一锁定根因，但不能写成“不能作为重点怀疑”。",
         "证据一致性硬规则：TPS/MSPT 主因只能优先引用 Server thread 证据。LDLib Async Thread、Netty、Worker 等后台线程可作为并发/同步压力说明，但不能直接当主线程 tick 根因。",
         "证据一致性硬规则：Neruina、Observable、Mixin catch/wrap/bridge 类帧通常是保护/观测/注入包装层。除非其自身下游没有更具体热点，否则必须继续看 callChains 的下游 terminal frame，不能把包装层写成根因。",
         "证据一致性硬规则：hot_paths.selectedCategories 中出现的每个高占比类别，都必须在最终 # 结论 或 # 证据链 中出现；尤其 block_entity 不能被 entity_tick/chunk_task 掩盖。",
@@ -243,11 +249,27 @@ export async function runToolAgent(
         messages.push({
           role: "user",
           content: [
-            "你的最终回答与 mod_sources 工具结果冲突。",
-            `mod_sources 已解析到非 unknown 来源: ${evidenceState.modSourcesNames.join(", ") || "存在，但名称未汇总"}`,
+            "你的最终回答与工具归因结果冲突。",
+            `已解析到非 unknown 来源: ${[...new Set([...evidenceState.hotPathSourceNames, ...evidenceState.modSourcesNames])].join(", ") || "存在，但名称未汇总"}`,
             "禁止写“mod_sources 全部 unknown / 无模组来源可解析帧 / 无法解析任何模组来源”。",
+            "如果来源来自 hot_paths.attribution 或 callChains terminalSource，也必须作为性能归因证据引用；不能因为 mod_sources top 汇总没列出就否定它。",
             "你可以写 unknown 占主导、部分顶层 Minecraft/混淆帧无法归因，但必须引用已解析来源帧，并说明其证据强度。",
             "重新输出最终 Markdown，保持 # 结论、# 证据链、# 排除项、# 还不能确定的点、# 立刻执行。",
+          ].join("\n"),
+        });
+        continue;
+      }
+
+      if (downplaysHotPathAttribution(content, evidenceState) && round < 10) {
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content: [
+            "你的最终回答弱化了 hot_paths.attribution / callChains 已经解析出的终端来源。",
+            `必须作为强候选列出的来源: ${evidenceState.hotPathSourceNames.join(", ") || "存在，但名称未汇总"}`,
+            `必须作为具体实体/生物候选列出的对象: ${evidenceState.hotPathEntityCandidates.join(", ") || "无或未匹配"}`,
+            "请改写：这些不是“唯一锁定根因”，但它们是当前报告里最具体的性能候选，必须进入 # 结论 或 # 证据链 的优先排查列表。",
+            "不要用“mod_sources 未形成一致归因”来否定 hot_paths 的 terminalSource。",
           ].join("\n"),
         });
         continue;
@@ -302,7 +324,7 @@ export async function runToolAgent(
             "这份回答仍然太像泛化建议，包含过多“可能/风险/建议进一步确认”。",
             "请继续调用最能缩小范围的工具。优先考虑:",
             '- {"tool":"diagnostic_hypotheses","args":{}}',
-            '- {"tool":"hot_paths","args":{"category":"auto","limit":32}}',
+            '- {"tool":"hot_paths","args":{"category":"auto","limit":64}}',
             '- {"tool":"evidence_gaps","args":{}}',
             '- {"tool":"mod_sources","args":{"limit":24}}',
             '- {"tool":"entity_chunks","args":{"limit":24}}',
@@ -348,6 +370,9 @@ function updateEvidenceState(
   evidenceState: {
     modSourcesResolved: boolean;
     modSourcesNames: string[];
+    hotPathSourcesResolved: boolean;
+    hotPathSourceNames: string[];
+    hotPathEntityCandidates: string[];
     entityChunkNames: string[];
     hotPathText: string;
     selectedHotPathCategories: string[];
@@ -370,6 +395,24 @@ function updateEvidenceState(
     evidenceState.hotPathText = `${evidenceState.hotPathText}\n${JSON.stringify(result).slice(0, 30000)}`.slice(-60000);
     if (tool === "hot_paths" && Array.isArray(result.selectedCategories)) {
       evidenceState.selectedHotPathCategories = [...new Set(result.selectedCategories.map(String))];
+    }
+    if (tool === "hot_paths") {
+      const attributionSources = ((result.attribution?.topSources ?? []) as AnyRecord[])
+        .filter((source) => String(source.sourceId ?? "unknown") !== "unknown")
+        .filter((source) => !isWrapperSource(source.sourceId, source.sourceName))
+        .map((source) => String(source.sourceName ?? source.sourceId ?? ""))
+        .filter(Boolean);
+      const chainSources = ((result.callChains ?? []) as AnyRecord[])
+        .filter((chain) => String(chain.terminalSourceId ?? "unknown") !== "unknown")
+        .filter((chain) => !isWrapperSource(chain.terminalSourceId, chain.terminalSourceName))
+        .map((chain) => String(chain.terminalSourceName ?? chain.terminalSourceId ?? ""))
+        .filter(Boolean);
+      const entityCandidates = ((result.attribution?.entityCandidates ?? []) as AnyRecord[])
+        .map((candidate) => String(candidate.entityId ?? ""))
+        .filter(Boolean);
+      evidenceState.hotPathSourceNames = [...new Set([...attributionSources, ...chainSources])].slice(0, 16);
+      evidenceState.hotPathEntityCandidates = [...new Set(entityCandidates)].slice(0, 16);
+      evidenceState.hotPathSourcesResolved = evidenceState.hotPathSourceNames.length > 0;
     }
   }
   if (tool !== "mod_sources") return;
@@ -412,7 +455,7 @@ function requiredToolsForReport(report: ReportDocument) {
 function defaultArgsForTool(tool: string): AnyRecord {
   if (tool === "hotspots") return { limit: 32 };
   if (tool === "hotspot_groups") return { limit: 24 };
-  if (tool === "hot_paths") return { category: "auto", limit: 32 };
+  if (tool === "hot_paths") return { category: "auto", limit: 64 };
   if (tool === "mod_sources") return { limit: 24 };
   if (tool === "time_windows") return { limit: 80 };
   if (tool === "worst_windows") return { limit: 16 };
@@ -444,9 +487,9 @@ function looksContradictoryFinal(content: string) {
 
 function contradictsResolvedModSources(
   content: string,
-  evidenceState: { modSourcesResolved: boolean; modSourcesNames: string[] },
+  evidenceState: { modSourcesResolved: boolean; modSourcesNames: string[]; hotPathSourcesResolved: boolean; hotPathSourceNames: string[] },
 ) {
-  if (!evidenceState.modSourcesResolved) return false;
+  if (!evidenceState.modSourcesResolved && !evidenceState.hotPathSourcesResolved) return false;
   const saysAllUnknown =
     content.includes("mod_sources 全部 unknown") ||
     content.includes("全部 unknown") ||
@@ -460,6 +503,24 @@ function contradictsResolvedModSources(
     content.includes("no mod sources") ||
     content.includes("all unknown");
   return saysAllUnknown;
+}
+
+function downplaysHotPathAttribution(
+  content: string,
+  evidenceState: { hotPathSourcesResolved: boolean; hotPathSourceNames: string[]; hotPathEntityCandidates: string[] },
+) {
+  if (!evidenceState.hotPathSourcesResolved) return false;
+  const downplaySignals = [
+    "不能把单一模组",
+    "不能把这些模组",
+    "不构成可排除的唯一成因结论",
+    "mod_sources 未对它们形成一致来源归因",
+    "mod_sources 没有一致归因",
+    "不能作为重点怀疑",
+    "不能重点怀疑",
+  ];
+  const mentionsCandidate = evidenceState.hotPathSourceNames.some((name) => name && content.toLowerCase().includes(name.toLowerCase()));
+  return mentionsCandidate && downplaySignals.some((signal) => content.includes(signal));
 }
 
 function contradictsEntityEvidence(
@@ -507,6 +568,11 @@ function contentMentionsCategory(content: string, category: string) {
     entity_ai_pathfinding: ["entity_ai_pathfinding", "实体 AI", "寻路", "GoalSelector", "PathNavigation"],
   };
   return (aliases[category] ?? [category]).some((alias) => content.includes(alias));
+}
+
+function isWrapperSource(sourceId: unknown, sourceName: unknown) {
+  const value = `${String(sourceId ?? "")} ${String(sourceName ?? "")}`.toLowerCase();
+  return ["neruina", "observable", "mixin", "minecraft", "unknown"].some((item) => value.includes(item));
 }
 
 function parseToolCall(content: string): { tool: string; args?: AnyRecord } | null {

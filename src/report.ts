@@ -76,6 +76,11 @@ export type ReportDocument = {
 };
 
 let protobufRoot: protobuf.Root | null = null;
+const HOT_PATH_MAX_DEPTH = 64;
+const HOT_PATH_ANCHOR_LIMIT = 24;
+const HOT_PATH_CALL_CHAIN_LIMIT = 32;
+const HOT_PATH_BRANCH_WIDTH = 8;
+const HOT_PATH_BEAM_WIDTH = 48;
 
 export async function parseReportBytes(
   bytes: Uint8Array,
@@ -408,12 +413,7 @@ function collectHotspots(raw: AnyRecord) {
     const rootRefs = Array.isArray(thread.childrenRefs) && thread.childrenRefs.length > 0
       ? thread.childrenRefs
       : rootNodeRefs(nodes);
-    const threadSamples = Math.max(
-      sumTimes(thread.times),
-      ...rootRefs.map((ref: unknown) => sumTimes(nodes[Number(ref)]?.times)),
-      ...nodes.map((node: AnyRecord) => sumTimes(node.times)),
-      0,
-    );
+    const threadSamples = maxThreadSamples(thread, nodes, rootRefs);
     for (const rootRef of rootRefs) {
       const node = nodes[Number(rootRef)];
       if (node) visitStackNode(node, nodes, thread.name ?? "unknown", threadSamples, hotspots, 0);
@@ -567,6 +567,7 @@ function summarizeHotPaths(report: ReportDocument, category: string, limit: numb
       frames: categoryResults.flatMap((result: AnyRecord) =>
         ((result.frames ?? []) as AnyRecord[]).map((frame) => ({ ...frame, category: result.category })),
       ).sort((left: AnyRecord, right: AnyRecord) => Number(right.maxPercent ?? 0) - Number(left.maxPercent ?? 0)).slice(0, limit),
+      attribution: buildHotPathAttribution(report, categoryResults, limit),
       selectionRule: "Drill actionable hotspot categories with maxPercent >= 3%, sorted by category maxPercent.",
       skippedCategories: (groups.byCategory as AnyRecord[])
         .filter((group) => !uniqueCategories.includes(group.category))
@@ -640,7 +641,15 @@ function summarizeHotPaths(report: ReportDocument, category: string, limit: numb
     methodSources,
     lineSources,
     sourceMetadata,
-    Math.min(limit, 16),
+    Math.min(limit, HOT_PATH_CALL_CHAIN_LIMIT),
+  );
+  const dominantPaths = summarizeDominantFlamePaths(
+    anchors,
+    classSources,
+    methodSources,
+    lineSources,
+    sourceMetadata,
+    Math.min(limit, 24),
   );
 
   return {
@@ -651,6 +660,7 @@ function summarizeHotPaths(report: ReportDocument, category: string, limit: numb
       samples: sumTimes(anchor.node.times),
       percent: anchor.threadSamples > 0 ? (sumTimes(anchor.node.times) / anchor.threadSamples) * 100 : 0,
     })),
+    dominantPaths,
     callChains,
     frames,
     interpretation: hotPathInterpretation(category, frames),
@@ -989,6 +999,8 @@ function buildDiagnosticHypotheses(report: ReportDocument) {
   const chunks = summarizeEntityChunks(report, 12);
   const windows = summarizeWorstWindows(report, 6);
   const gaps = buildEvidenceGaps(report);
+  const hotPaths = summarizeHotPaths(report, "auto", 64);
+  const hotPathAttribution = hotPaths.attribution as AnyRecord | undefined;
   const hypotheses: AnyRecord[] = [];
   const categoryMap = new Map((groups.byCategory as AnyRecord[]).map((entry) => [entry.category, entry]));
   const denseChunk = (chunks.topChunks as AnyRecord[])[0];
@@ -999,6 +1011,83 @@ function buildDiagnosticHypotheses(report: ReportDocument) {
     .filter((source) => source.sourceId !== "unknown")
     .filter(sourceHasServerThreadFrame)
     .slice(0, 32);
+
+  const hotPathSourceCandidates = ((hotPathAttribution?.topSources ?? []) as AnyRecord[])
+    .filter((source) => source.sourceId !== "unknown")
+    .filter((source) => !isWrapperSource(source.sourceId, source.sourceName))
+    .slice(0, 12);
+  const hotPathCategoryEvidence = ((hotPathAttribution?.byCategory ?? []) as AnyRecord[])
+    .map((entry) => {
+      const sourcesByCategory = ((entry.topSources ?? []) as AnyRecord[])
+        .filter((source) => !isWrapperSource(source.sourceId, source.sourceName))
+        .slice(0, 6);
+      const entitiesByCategory = ((entry.entityCandidates ?? []) as AnyRecord[]).slice(0, 8);
+      const sourceText = sourcesByCategory.length
+        ? sourcesByCategory.map((source) =>
+          `${source.sourceName ?? source.sourceId} ${formatPercent(source.maxPercent)} [${((source.terminalFrames ?? []) as AnyRecord[]).slice(0, 2).map((frame) => frame.label).join("; ")}]`,
+        ).join(" | ")
+        : "无非 wrapper 模组来源";
+      const entityText = entitiesByCategory.length
+        ? ` entityCandidates: ${entitiesByCategory.map((candidate) => `${candidate.entityId} ${formatPercent(candidate.percent)}`).join(", ")}`
+        : "";
+      const dominantText = ((entry.dominantPaths ?? []) as AnyRecord[]).slice(0, 3).map((path) =>
+        `${((path.frames ?? []) as AnyRecord[]).map((frame) => `${frame.sourceName ?? frame.sourceId}:${frame.label} ${formatPercent(frame.percent)}`).join(" -> ")}`,
+      ).join(" || ");
+      return `${entry.category}: terminalSources: ${sourceText}${entityText}${dominantText ? ` dominantPaths: ${dominantText}` : ""}`;
+    });
+  if (hotPathSourceCandidates.length || hotPathCategoryEvidence.length) {
+    hypotheses.push({
+      id: "hot_path_terminal_sources",
+      confidence: confidenceFromEvidence([
+        hotPathSourceCandidates.some((source) => Number(source.maxPercent ?? 0) >= 1) || hotPathCategoryEvidence.length > 0,
+        Boolean(entityGroup) || Boolean(blockEntityGroup) || Boolean(categoryMap.get("chunk_task")),
+        hotPathSourceCandidates.some((source) => Array.isArray(source.terminalFrames) && source.terminalFrames.length > 0),
+      ]),
+      conclusion: "hot_paths 已按高占用类别下钻到具体终端模组/类；每个 selected category 都必须独立看",
+      evidence: [
+        `selectedCategories: ${((hotPaths.selectedCategories ?? []) as string[]).join(", ")}`,
+        ...hotPathCategoryEvidence,
+        ...hotPathSourceCandidates.slice(0, 8).map((source) =>
+          `global: ${source.sourceName ?? source.sourceId} max ${formatPercent(source.maxPercent)} categories ${(source.categories ?? []).join(", ")} frames: ${((source.terminalFrames ?? []) as AnyRecord[]).slice(0, 3).map((frame) => `${frame.label} ${formatPercent(frame.percent)}`).join("; ")}`,
+        ),
+      ],
+      limitations: [
+        "这些来源来自 hot_paths terminal frames，是性能路径候选；不要求 mod_sources 再次汇总到同一来源才成立。",
+        "全局排序不能替代逐类别下钻；entity_tick、chunk_task、block_entity 等高占用类别必须分别解释。",
+        "普通 sampler 仍不能证明单个实例或单个坐标；但这些模组/类应优先检查和复测。",
+      ],
+      nextActions: [
+        "按 hot_paths terminal source 优先做 A/B 复测或配置隔离，而不是先怀疑 Neruina/Observable 包装层。",
+        "对 entity_tick 终端实体类，结合 entity_chunks 和 only-ticks-over 捕获确认具体场景。",
+      ],
+    });
+  }
+
+  const entityCandidates = ((hotPathAttribution?.entityCandidates ?? []) as AnyRecord[])
+    .filter((candidate) => candidate.entityId)
+    .slice(0, 16);
+  if (entityCandidates.length) {
+    hypotheses.push({
+      id: "hot_path_entity_candidates",
+      confidence: confidenceFromEvidence([
+        entityCandidates.some((candidate) => candidate.confidence === "high"),
+        entityCandidates.some((candidate) => Number(candidate.percent ?? 0) >= 0.5),
+        Boolean(entityGroup),
+      ]),
+      conclusion: "hot_paths 已把部分实体 tick 终端帧匹配到具体实体/生物候选",
+      evidence: entityCandidates.slice(0, 8).map((candidate) =>
+        `${candidate.entityId} via ${candidate.sourceName ?? candidate.sourceId}:${candidate.label} ${formatPercent(candidate.percent)} (${candidate.confidence}, ${candidate.reason})`,
+      ),
+      limitations: [
+        "这是实体类型/类级别归因，不是单个实体 UUID。",
+        "如果 entity_chunks 中没有对应密集现场，也仍可能是少量高耗实体逻辑；需要 only-ticks-over 复测。",
+      ],
+      nextActions: [
+        "优先在服务器里定位这些实体类型出现的位置，减少/隔离后重采 profile。",
+        "若无法复现，采 /spark profiler --only-ticks-over 50 --timeout 120 捕捉尖峰级实体调用链。",
+      ],
+    });
+  }
 
   for (const source of sourceCandidates) {
     const namespace = bestNamespaceMatch(source, namespaceStats);
@@ -1354,12 +1443,7 @@ function collectHotPathAnchors(raw: AnyRecord, category: string) {
     const rootRefs = Array.isArray(thread.childrenRefs) && thread.childrenRefs.length > 0
       ? thread.childrenRefs
       : rootNodeRefs(nodes);
-    const threadSamples = Math.max(
-      sumTimes(thread.times),
-      ...rootRefs.map((ref: unknown) => sumTimes(nodes[Number(ref)]?.times)),
-      ...nodes.map((node: AnyRecord) => sumTimes(node.times)),
-      0,
-    );
+    const threadSamples = maxThreadSamples(thread, nodes, rootRefs);
     const seen = new Set<number>();
     for (const rootRef of rootRefs) {
       collectHotPathAnchorsFromNode(
@@ -1432,7 +1516,7 @@ function collectHotPathAnchorsFromNode(
 
 function collectDescendants(nodes: AnyRecord[], index: number, depth = 0, seen = new Set<number>()) {
   const node = nodes[index];
-  if (!node || seen.has(index) || depth > 36) return [] as Array<{ node: AnyRecord; depth: number }>;
+  if (!node || seen.has(index) || depth > HOT_PATH_MAX_DEPTH) return [] as Array<{ node: AnyRecord; depth: number }>;
   seen.add(index);
   const out: Array<{ node: AnyRecord; depth: number }> = [{ node, depth }];
   for (const childRef of node.childrenRefs ?? []) {
@@ -1457,7 +1541,7 @@ function summarizeHotPathCallChains(
   limit: number,
 ) {
   const chains: AnyRecord[] = [];
-  for (const anchor of anchors.slice(0, 12)) {
+  for (const anchor of anchors.slice(0, HOT_PATH_ANCHOR_LIMIT)) {
     collectHotPathCallChainsFromNode(
       anchor,
       anchor.index,
@@ -1503,7 +1587,7 @@ function collectHotPathCallChainsFromNode(
   depth: number,
 ) {
   const node = anchor.nodes[index];
-  if (!node || seen.has(index) || depth > 36) return;
+  if (!node || seen.has(index) || depth > HOT_PATH_MAX_DEPTH) return;
   seen.add(index);
   const nextPath = [...path, node];
   const label = formatStackLabel(node);
@@ -1596,11 +1680,193 @@ function compactCallChainPath(
 }
 
 function isConcreteHotPathFrame(label: string, sourceId: string, category: string) {
-  if (sourceId === "unknown") return false;
   if (isImportantCallChainWrapper(label)) return false;
   if (frameMatchesHotPathCategory(label, category)) return false;
   if (isGenericFrame(label)) return false;
+  if (sourceId === "unknown" && category !== "entity_tick") return false;
+  if (sourceId === "unknown" && !isConcreteEntityTickFrame(label)) return false;
   return true;
+}
+
+function summarizeDominantFlamePaths(
+  anchors: Array<{
+    thread: string;
+    index: number;
+    node: AnyRecord;
+    nodes: AnyRecord[];
+    threadSamples: number;
+  }>,
+  classSources: AnyRecord,
+  methodSources: AnyRecord,
+  lineSources: AnyRecord,
+  sourceMetadata: AnyRecord,
+  limit: number,
+) {
+  const paths: AnyRecord[] = [];
+  for (const anchor of anchors.slice(0, HOT_PATH_ANCHOR_LIMIT)) {
+    paths.push(...followDominantBranches(
+      anchor,
+      anchor.index,
+      classSources,
+      methodSources,
+      lineSources,
+      sourceMetadata,
+      limit,
+    ));
+  }
+  const byKey = new Map<string, AnyRecord>();
+  for (const path of paths) {
+    const key = path.frames.map((frame: AnyRecord) => frame.label).join(" > ");
+    const existing = byKey.get(key);
+    if (!existing || Number(path.terminalPercent ?? 0) > Number(existing.terminalPercent ?? 0)) {
+      byKey.set(key, path);
+    }
+  }
+  return [...byKey.values()]
+    .sort((left, right) => Number(right.terminalPercent ?? 0) - Number(left.terminalPercent ?? 0))
+    .slice(0, limit);
+}
+
+function followDominantBranches(
+  anchor: {
+    thread: string;
+    index: number;
+    nodes: AnyRecord[];
+    threadSamples: number;
+  },
+  index: number,
+  classSources: AnyRecord,
+  methodSources: AnyRecord,
+  lineSources: AnyRecord,
+  sourceMetadata: AnyRecord,
+  limit: number,
+) {
+  type Candidate = {
+    index: number;
+    frames: AnyRecord[];
+    branchPoints: AnyRecord[];
+    seen: Set<number>;
+  };
+
+  const startNode = anchor.nodes[index];
+  if (!startNode) return [] as AnyRecord[];
+
+  let frontier: Candidate[] = [{
+    index,
+    frames: [flameFrame(startNode, anchor.threadSamples, classSources, methodSources, lineSources, sourceMetadata)],
+    branchPoints: [],
+    seen: new Set([index]),
+  }];
+  const completed: Candidate[] = [];
+
+  for (let depth = 0; depth <= HOT_PATH_MAX_DEPTH; depth += 1) {
+    const next: Candidate[] = [];
+    for (const candidate of frontier) {
+      const node = anchor.nodes[candidate.index];
+      if (!node) continue;
+      const children = ((node.childrenRefs ?? []) as unknown[])
+        .map((ref) => Number(ref))
+        .map((childIndex) => ({ index: childIndex, node: anchor.nodes[childIndex], samples: sumTimes(anchor.nodes[childIndex]?.times) }))
+        .filter((child) => child.node && !candidate.seen.has(child.index))
+        .sort((left, right) => right.samples - left.samples);
+
+      if (!children.length) {
+        completed.push(candidate);
+        continue;
+      }
+
+      const branchPoint = {
+        depth,
+        parent: formatStackLabel(node),
+        children: children.slice(0, HOT_PATH_BRANCH_WIDTH).map((child) => {
+          const entry = flameFrame(child.node, anchor.threadSamples, classSources, methodSources, lineSources, sourceMetadata);
+          return {
+            ...entry,
+            childShareOfParent: sumTimes(node.times) > 0 ? child.samples / sumTimes(node.times) : 0,
+          };
+        }),
+      };
+
+      for (const child of children.slice(0, HOT_PATH_BRANCH_WIDTH)) {
+        next.push({
+          index: child.index,
+          frames: [
+            ...candidate.frames,
+            flameFrame(child.node, anchor.threadSamples, classSources, methodSources, lineSources, sourceMetadata),
+          ],
+          branchPoints: [...candidate.branchPoints, branchPoint],
+          seen: new Set([...candidate.seen, child.index]),
+        });
+      }
+    }
+
+    if (!next.length) break;
+    frontier = next
+      .sort((left, right) => Number(right.frames.at(-1)?.percent ?? 0) - Number(left.frames.at(-1)?.percent ?? 0))
+      .slice(0, Math.max(limit, HOT_PATH_BEAM_WIDTH));
+  }
+  completed.push(...frontier);
+
+  return completed
+    .filter((candidate) => candidate.frames.length > 1)
+    .map((candidate) => {
+      const terminal = candidate.frames.at(-1) ?? {};
+      return {
+        thread: anchor.thread,
+        anchor: candidate.frames[0],
+        terminal,
+        terminalPercent: terminal.percent,
+        frames: compactDominantPath(candidate.frames),
+        branchPoints: candidate.branchPoints.slice(0, 16),
+      };
+    })
+    .sort((left, right) => Number(right.terminalPercent ?? 0) - Number(left.terminalPercent ?? 0))
+    .slice(0, limit);
+}
+
+function flameFrame(
+  node: AnyRecord,
+  threadSamples: number,
+  classSources: AnyRecord,
+  methodSources: AnyRecord,
+  lineSources: AnyRecord,
+  sourceMetadata: AnyRecord,
+) {
+  const label = formatStackLabel(node);
+  const className = node.className ?? classNameFromLabel(label);
+  const methodName = node.methodName ?? methodNameFromLabel(label);
+  const sourceId = resolveSourceId(
+    { className, methodName, methodDesc: node.methodDesc, lineNumber: node.lineNumber },
+    classSources,
+    methodSources,
+    lineSources,
+  );
+  const source = sourceMetadata[sourceId] ?? {};
+  const samples = sumTimes(node.times);
+  return {
+    label,
+    className,
+    methodName,
+    sourceId,
+    sourceName: source.name ?? sourceId,
+    samples,
+    percent: threadSamples > 0 ? (samples / threadSamples) * 100 : 0,
+    category: classifyFrame(label),
+  };
+}
+
+function compactDominantPath(frames: AnyRecord[]) {
+  if (frames.length <= 18) return frames;
+  return [...frames.slice(0, 8), ...frames.slice(-10)];
+}
+
+function isConcreteEntityTickFrame(label: string) {
+  const lower = label.toLowerCase();
+  return lower.includes(".m_8119_") && (
+    lower.includes(".world.entity.") ||
+    lower.includes(".entity.") ||
+    lower.includes(".mobs.entity.")
+  );
 }
 
 function isImportantCallChainWrapper(label: string) {
@@ -2132,6 +2398,198 @@ function sortNamedValues(values: AnyRecord | undefined) {
 
 function sumTimes(times: unknown) {
   return Array.isArray(times) ? times.reduce((sum, value) => sum + Number(value || 0), 0) : 0;
+}
+
+function isWrapperSource(sourceId: unknown, sourceName: unknown) {
+  const value = `${String(sourceId ?? "")} ${String(sourceName ?? "")}`.toLowerCase();
+  return ["neruina", "observable", "mixin", "minecraft", "unknown"].some((item) => value.includes(item));
+}
+
+function buildHotPathAttribution(report: ReportDocument, categoryResults: AnyRecord[], limit: number) {
+  const chains = categoryResults.flatMap((result) =>
+    ((result.callChains ?? []) as AnyRecord[]).map((chain) => ({ ...chain, category: result.category })),
+  );
+  const frames = categoryResults.flatMap((result) =>
+    ((result.frames ?? []) as AnyRecord[]).map((frame) => ({ ...frame, category: result.category })),
+  );
+  const knownEntities = knownEntityIds(report);
+  const attributionItems: AnyRecord[] = [...chains, ...frames];
+  const global = summarizeAttributionItems(attributionItems, knownEntities, limit);
+  const byCategory = categoryResults.map((result) => {
+    const category = String(result.category ?? "");
+    const items = attributionItems.filter((item) => String(item.category ?? "") === category);
+    return {
+      category,
+      ...summarizeAttributionItems(items, knownEntities, limit),
+      callChains: ((result.callChains ?? []) as AnyRecord[]).slice(0, Math.min(limit, HOT_PATH_CALL_CHAIN_LIMIT)),
+      dominantPaths: ((result.dominantPaths ?? []) as AnyRecord[]).slice(0, Math.min(limit, 24)),
+    };
+  });
+
+  return {
+    topSources: global.topSources,
+    entityCandidates: global.entityCandidates,
+    byCategory,
+    limits: {
+      maxDepth: HOT_PATH_MAX_DEPTH,
+      anchorLimit: HOT_PATH_ANCHOR_LIMIT,
+      callChainLimit: HOT_PATH_CALL_CHAIN_LIMIT,
+      branchWidth: HOT_PATH_BRANCH_WIDTH,
+      beamWidth: HOT_PATH_BEAM_WIDTH,
+    },
+    interpretation: [
+      "topSources groups concrete terminal hot frames by resolved mod/source.",
+      "byCategory repeats the same attribution per selected hot path category so high-usage categories cannot hide behind a global sort.",
+      "entityCandidates only appears when a terminal frame class/method can be matched to an entity id present in report world stats.",
+      "This improves mod/entity attribution, but ordinary spark sampler data still cannot identify a single entity instance UUID or exact block position.",
+    ],
+  };
+}
+
+function summarizeAttributionItems(
+  items: AnyRecord[],
+  knownEntities: Array<{ id: string; namespace: string; path: string }>,
+  limit: number,
+) {
+  const bySource = new Map<string, AnyRecord>();
+  const entityCandidates: AnyRecord[] = [];
+
+  for (const item of items) {
+    const sourceId = String(item.terminalSourceId ?? item.sourceId ?? "unknown");
+    const sourceName = String(item.terminalSourceName ?? item.sourceName ?? sourceId);
+    const label = String(item.terminalLabel ?? item.label ?? "");
+    const percent = Number(item.terminalPercent ?? item.maxPercent ?? 0);
+    const category = String(item.category ?? "");
+    const matched = matchKnownEntitiesToFrame(label, sourceId, sourceName, knownEntities);
+
+    if (sourceId !== "unknown") {
+      const sourceEntry = bySource.get(sourceId) ?? {
+        sourceId,
+        sourceName,
+        maxPercent: 0,
+        categories: [] as string[],
+        terminalFrames: [] as AnyRecord[],
+        matchedEntities: [] as AnyRecord[],
+      };
+      sourceEntry.maxPercent = Math.max(sourceEntry.maxPercent, percent);
+      if (category && !sourceEntry.categories.includes(category)) sourceEntry.categories.push(category);
+      if (label && sourceEntry.terminalFrames.length < 8) {
+        sourceEntry.terminalFrames.push({ label, percent, category });
+      }
+      for (const entity of matched) {
+        const candidate = {
+          entityId: entity.id,
+          sourceId,
+          sourceName,
+          label,
+          category,
+          percent,
+          confidence: entity.confidence,
+          reason: entity.reason,
+        };
+        if (!sourceEntry.matchedEntities.some((existing: AnyRecord) => existing.entityId === entity.id)) {
+          sourceEntry.matchedEntities.push(candidate);
+        }
+      }
+      bySource.set(sourceId, sourceEntry);
+    }
+
+    for (const entity of matched) {
+      entityCandidates.push({
+        entityId: entity.id,
+        sourceId,
+        sourceName,
+        label,
+        category,
+        percent,
+        confidence: entity.confidence,
+        reason: entity.reason,
+      });
+    }
+  }
+
+  return {
+    topSources: [...bySource.values()]
+      .sort((left, right) => Number(right.maxPercent ?? 0) - Number(left.maxPercent ?? 0))
+      .slice(0, limit),
+    entityCandidates: dedupeEntityCandidates(entityCandidates).slice(0, limit),
+  };
+}
+
+function knownEntityIds(report: ReportDocument) {
+  const chunks = summarizeEntityChunks(report, 80);
+  const ids = new Set<string>();
+  for (const item of (chunks.topEntityTypes ?? []) as NamedValue[]) {
+    if (item.name) ids.add(String(item.name));
+  }
+  for (const chunk of (chunks.topChunks ?? []) as AnyRecord[]) {
+    for (const item of (chunk.topEntities ?? []) as NamedValue[]) {
+      if (item.name) ids.add(String(item.name));
+    }
+  }
+  return [...ids].map((id) => ({
+    id,
+    namespace: entityNamespace(id),
+    path: id.includes(":") ? id.split(":").slice(1).join(":") : id,
+  }));
+}
+
+function matchKnownEntitiesToFrame(
+  label: string,
+  sourceId: string,
+  sourceName: string,
+  entities: Array<{ id: string; namespace: string; path: string }>,
+) {
+  const normalizedLabel = normalizeToken(label);
+  const simpleClass = normalizeToken(classNameFromLabel(label).split(".").at(-1) ?? "");
+  const sourceTokens = normalizedSourceNamesFor({ sourceId, name: sourceName });
+  const matches: Array<{ id: string; confidence: string; reason: string }> = [];
+
+  for (const entity of entities) {
+    const namespaceToken = normalizeToken(entity.namespace);
+    const pathToken = normalizeToken(entity.path);
+    if (!pathToken || pathToken.length < 3) continue;
+    const namespaceMatches = namespaceToken && sourceTokens.includes(namespaceToken);
+    const classMatches =
+      normalizedLabel.includes(pathToken) ||
+      normalizedLabel.includes(`entity${pathToken}`) ||
+      simpleClass === pathToken ||
+      simpleClass === `entity${pathToken}`;
+    if (!classMatches && !namespaceMatches) continue;
+    if (classMatches && namespaceMatches) {
+      matches.push({ id: entity.id, confidence: "high", reason: "terminal frame class matches entity id and source namespace" });
+    } else if (classMatches) {
+      matches.push({ id: entity.id, confidence: "medium", reason: "terminal frame class matches entity id" });
+    } else {
+      matches.push({ id: entity.id, confidence: "low", reason: "source namespace matches entity namespace, but frame class is not entity-specific" });
+    }
+  }
+
+  return matches.sort((left, right) => confidenceRank(right.confidence) - confidenceRank(left.confidence));
+}
+
+function dedupeEntityCandidates(candidates: AnyRecord[]) {
+  const byKey = new Map<string, AnyRecord>();
+  for (const candidate of candidates) {
+    const key = `${candidate.entityId}|${candidate.sourceId}|${candidate.label}`;
+    const existing = byKey.get(key);
+    if (!existing || Number(candidate.percent ?? 0) > Number(existing.percent ?? 0)) byKey.set(key, candidate);
+  }
+  return [...byKey.values()].sort((left, right) =>
+    confidenceRank(right.confidence) - confidenceRank(left.confidence) ||
+    Number(right.percent ?? 0) - Number(left.percent ?? 0),
+  );
+}
+
+function maxThreadSamples(thread: AnyRecord, nodes: AnyRecord[], rootRefs: unknown[]) {
+  let max = Math.max(sumTimes(thread.times), 0);
+  for (const ref of rootRefs) {
+    max = Math.max(max, sumTimes(nodes[Number(ref)]?.times));
+  }
+  for (const node of nodes) {
+    max = Math.max(max, sumTimes(node.times));
+  }
+  return max;
 }
 
 function formatStackLabel(node: AnyRecord) {
