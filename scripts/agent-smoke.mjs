@@ -103,7 +103,7 @@ function collectHotspots(raw) {
   for (const thread of raw.threads ?? []) {
     const nodes = thread.children ?? [];
     const roots = rootNodeRefs(nodes);
-    const total = Math.max(...nodes.map((node) => sumTimes(node.times)), 0);
+    const total = maxNodeSamples(nodes);
     for (const rootRef of roots) {
       visit(nodes[rootRef], nodes, thread.name ?? "unknown", total, hotspots, 0);
     }
@@ -172,7 +172,7 @@ function hotPaths(raw, category, limit) {
     if (serverThreadCategory(category) && !serverThreadName(thread.name)) continue;
     const nodes = thread.children ?? [];
     const roots = rootNodeRefs(nodes);
-    const total = Math.max(...nodes.map((node) => sumTimes(node.times)), 0);
+    const total = maxNodeSamples(nodes);
     for (const rootRef of roots) {
       for (const anchor of findAnchors(nodes, Number(rootRef), category)) {
         for (const node of descendants(nodes, anchor)) {
@@ -220,7 +220,7 @@ function hotPathCallChains(raw, category, limit) {
     if (serverThreadCategory(category) && !serverThreadName(thread.name)) continue;
     const nodes = thread.children ?? [];
     const roots = rootNodeRefs(nodes);
-    const total = Math.max(sumTimes(thread.times), ...nodes.map((node) => sumTimes(node.times)), 0);
+    const total = Math.max(sumTimes(thread.times), maxNodeSamples(nodes), 0);
     for (const rootRef of roots) {
       for (const anchor of findAnchors(nodes, Number(rootRef), category)) {
         collectChains(nodes, anchor, [], total, category, classSources, methodSources, lineSources, sources, chains, new Set(), 0);
@@ -794,6 +794,14 @@ function formatNumber(value) {
 
 function sumTimes(times) {
   return Array.isArray(times) ? times.reduce((sum, value) => sum + Number(value || 0), 0) : 0;
+}
+
+function maxNodeSamples(nodes) {
+  let max = 0;
+  for (const node of nodes) {
+    max = Math.max(max, sumTimes(node.times));
+  }
+  return max;
 }
 
 function isGeneric(label) {

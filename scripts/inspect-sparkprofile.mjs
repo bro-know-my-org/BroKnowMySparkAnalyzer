@@ -61,12 +61,7 @@ function collectHotspots(raw) {
     const rootRefs = Array.isArray(thread.childrenRefs) && thread.childrenRefs.length > 0
       ? thread.childrenRefs
       : rootNodeRefs(nodes);
-    const threadSamples = Math.max(
-      sumTimes(thread.times),
-      ...rootRefs.map((ref) => sumTimes(nodes[Number(ref)]?.times)),
-      ...nodes.map((node) => sumTimes(node.times)),
-      0,
-    );
+    const threadSamples = maxThreadSamples(thread, nodes, rootRefs);
     for (const rootRef of rootRefs) {
       const node = nodes[Number(rootRef)];
       if (!node) {
@@ -123,6 +118,17 @@ function visitStackNode(node, siblings, thread, threadSamples, hotspots, depth) 
 
 function sumTimes(times) {
   return Array.isArray(times) ? times.reduce((sum, value) => sum + Number(value || 0), 0) : 0;
+}
+
+function maxThreadSamples(thread, nodes, rootRefs) {
+  let max = Math.max(sumTimes(thread.times), 0);
+  for (const ref of rootRefs) {
+    max = Math.max(max, sumTimes(nodes[Number(ref)]?.times));
+  }
+  for (const node of nodes) {
+    max = Math.max(max, sumTimes(node.times));
+  }
+  return max;
 }
 
 function isGenericFrame(label) {
