@@ -111,6 +111,12 @@ jobs:
           node -e $script
 
       - name: Build Tauri bundles
+        if: runner.os != 'macOS'
+        run: pnpm tauri build
+
+      - name: Build Tauri macOS bundles
+        if: runner.os == 'macOS'
+        continue-on-error: true
         run: pnpm tauri build
 
       - name: Rename release assets
@@ -144,17 +150,29 @@ jobs:
             if (-not $rpm) { throw "rpm package was not produced" }
             Copy-Item -LiteralPath $rpm.FullName -Destination "release-assets/$prefix.rpm"
           } elseif ($env:ASSET_OS -eq "macos") {
-            $dmg = Get-ChildItem "src-tauri/target/release/bundle/dmg" -Filter "*.dmg" | Select-Object -First 1
-            if (-not $dmg) { throw "dmg was not produced" }
-            Copy-Item -LiteralPath $dmg.FullName -Destination "release-assets/$prefix.dmg"
+            $dmg = Get-ChildItem "src-tauri/target/release/bundle/dmg" -Filter "*.dmg" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dmg) {
+              Copy-Item -LiteralPath $dmg.FullName -Destination "release-assets/$prefix.dmg"
+            } else {
+              Write-Warning "DMG was not produced; skipping macOS release asset."
+            }
           }
 
-      - name: Upload release assets
+      - name: Upload required release assets
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: release-assets-${{ matrix.asset_os }}-${{ matrix.arch }}
           path: release-assets/*
           if-no-files-found: error
+
+      - name: Upload optional macOS release assets
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.asset_os }}-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: warn
 
   publish:
     name: Publish GitHub Release
