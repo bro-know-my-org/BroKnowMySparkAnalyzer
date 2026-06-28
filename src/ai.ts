@@ -135,6 +135,7 @@ export async function runToolAgent(
     entityChunkNames: [] as string[],
     hotPathText: "",
     selectedHotPathCategories: [] as string[],
+    majorHotspotCategories: [] as string[],
   };
   const inventory = executeReportTool(report, "report_inventory", {});
   const inventoryText = JSON.stringify(inventory, null, 2);
@@ -156,9 +157,12 @@ export async function runToolAgent(
         "如果证据不能唯一定位，不要伪装成确定；写“证据不足以唯一定位”，并说明还需要补采哪种 spark profile。",
         "当你需要数据时，只输出一个 JSON 对象，不要包裹 markdown：",
         '{"tool":"overview","args":{}}',
-        "可用工具: report_inventory, overview, environment, hotspots, hotspot_groups, hot_paths, mod_sources, time_windows, worst_windows, entities, entity_chunks, heap, memory_gc, diagnostic_hypotheses, evidence_gaps, raw_field。",
+        "可用工具: report_inventory, overview, environment, hotspots, hotspot_groups, hot_paths, mod_sources, time_windows, worst_windows, entities, entity_chunks, heap, memory_gc, evidence_links, diagnostic_hypotheses, evidence_gaps, raw_field。",
         `最终回答前必须至少查完这些工具: ${requiredTools.join(", ")}。`,
         "diagnostic_hypotheses 是本地规则生成的候选结论；evidence_gaps 会告诉你当前报告不能证明什么。",
+        "evidence_links 是跨内容证据索引，会把 hot_paths、mod_sources、entity_chunks、worst_windows、memory_gc 中重复出现的来源/实体/类别/窗口串起来；最终回答必须优先引用 strongestLinks 里的强联动，再展开单个工具细节。",
+        "结论覆盖硬规则：如果 diagnostic_hypotheses.categoryLoadProfile.majorCategories 有多个类别，# 结论 第一段必须写成“主导项 + 其他显著贡献项”，逐个列出这些类别及百分比；禁止只把最高类别写成唯一主因。",
+        "结论措辞硬规则：只有当最高类别明显压倒其他类别（例如第二名低于最高项 25% 且低于 10%）时，才可写“绝对主导/唯一主因”。否则应写“主导项之一/首要贡献项”，并把 chunk_task、entity_tick、world_tick、block_entity 等 major categories 都纳入优先排查。",
         "environment 是报告内 metadata/system statistics/source list，不是本机信息采集。它只能作为平台、版本、Java/JVM、服务器配置、资源上下文，不能单独证明 TPS/MSPT 根因。",
         "证据一致性硬规则：metadata.sources 只能证明报告记录了这些 mod/plugin；只有 mod_sources/hot_paths 把 CPU 帧解析到该来源时，才能把该来源写进性能热点证据。",
         "hot_paths 默认使用 category:auto：先根据 hotspot_groups 自动选择高占比且可下钻的类别，再分别展开具体子帧。最终回答必须引用 hot_paths 的自动下钻结果，而不是停在聚合入口。",
@@ -306,6 +310,20 @@ export async function runToolAgent(
         continue;
       }
 
+      if (omitsMajorHotspotCategory(content, evidenceState) && round < 10) {
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content: [
+            "你的最终回答把主线程显著热点类别压缩成了单一主因，漏掉了 diagnostic_hypotheses.categoryLoadProfile.majorCategories。",
+            `必须在 # 结论 第一段覆盖的显著类别: ${evidenceState.majorHotspotCategories.join(", ")}`,
+            "请改写为“主导项 + 其他显著贡献项”，逐项列出类别和百分比；只有最高项可称首要贡献项，不能写成唯一主因。",
+            "重新输出最终 Markdown，保持 # 结论、# 证据链、# 排除项、# 还不能确定的点、# 立刻执行。",
+          ].join("\n"),
+        });
+        continue;
+      }
+
       if (contradictsGcCorrelation(content) && round < 10) {
         messages.push({ role: "assistant", content });
         messages.push({
@@ -328,6 +346,8 @@ export async function runToolAgent(
             "请继续调用最能缩小范围的工具。优先考虑:",
             '- {"tool":"diagnostic_hypotheses","args":{}}',
             '- {"tool":"hot_paths","args":{"category":"auto","limit":64}}',
+            '- {"tool":"evidence_links","args":{"limit":16}}',
+            "- 必须使用 diagnostic_hypotheses.categoryLoadProfile 检查是否存在多个 majorCategories；存在时不得只输出一个主因。",
             '- {"tool":"evidence_gaps","args":{}}',
             '- {"tool":"mod_sources","args":{"limit":24}}',
             '- {"tool":"entity_chunks","args":{"limit":24}}',
@@ -379,12 +399,19 @@ function updateEvidenceState(
     entityChunkNames: string[];
     hotPathText: string;
     selectedHotPathCategories: string[];
+    majorHotspotCategories: string[];
   },
   tool: string,
   toolResult: unknown,
 ) {
   if (!toolResult || typeof toolResult !== "object") return;
   const result = toolResult as AnyRecord;
+  if (tool === "diagnostic_hypotheses") {
+    const majorCategories = ((result.categoryLoadProfile?.majorCategories ?? []) as AnyRecord[])
+      .map((category) => String(category.category ?? ""))
+      .filter(Boolean);
+    evidenceState.majorHotspotCategories = [...new Set(majorCategories)].slice(0, 12);
+  }
   if (tool === "entity_chunks") {
     const names = [
       ...((Array.isArray(result.topEntityTypes) ? result.topEntityTypes : []) as AnyRecord[]).map((item) => item.name),
@@ -450,6 +477,7 @@ function requiredToolsForReport(report: ReportDocument) {
     "entity_chunks",
     "mod_sources",
     "memory_gc",
+    "evidence_links",
     "diagnostic_hypotheses",
     "evidence_gaps",
   ];
@@ -463,6 +491,7 @@ function defaultArgsForTool(tool: string): AnyRecord {
   if (tool === "time_windows") return { limit: 80 };
   if (tool === "worst_windows") return { limit: 16 };
   if (tool === "entity_chunks") return { limit: 24 };
+  if (tool === "evidence_links") return { limit: 16 };
   if (tool === "heap") return { limit: 40 };
   return {};
 }
@@ -562,11 +591,24 @@ function omitsSelectedHotPathCategory(
   return required.some((category) => !contentMentionsCategory(content, category));
 }
 
+function omitsMajorHotspotCategory(
+  content: string,
+  evidenceState: { majorHotspotCategories: string[] },
+) {
+  if (evidenceState.majorHotspotCategories.length <= 1) return false;
+  const required = evidenceState.majorHotspotCategories.filter((category) =>
+    ["block_entity", "chunk_task", "entity_tick", "world_tick", "commands", "entity_ai_pathfinding"].includes(category),
+  );
+  if (required.length <= 1) return false;
+  return required.some((category) => !contentMentionsCategory(content, category));
+}
+
 function contentMentionsCategory(content: string, category: string) {
   const aliases: Record<string, string[]> = {
     block_entity: ["block_entity", "BlockEntity", "方块实体", "方块实体 tick", "BlockEntityTicker"],
     chunk_task: ["chunk_task", "区块任务", "区块加载", "ChunkMap", "ServerChunkCache"],
     entity_tick: ["entity_tick", "实体 tick", "实体tick", "EntityTickList"],
+    world_tick: ["world_tick", "世界 tick", "world tick", "ServerLevel"],
     commands: ["commands", "命令", "function", "CommandFunction"],
     entity_ai_pathfinding: ["entity_ai_pathfinding", "实体 AI", "寻路", "GoalSelector", "PathNavigation"],
   };

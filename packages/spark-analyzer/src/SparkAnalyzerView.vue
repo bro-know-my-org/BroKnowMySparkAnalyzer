@@ -878,6 +878,10 @@ function traceSummary(trace: AgentTrace) {
       ? `${language.value === "zh" ? "GC/内存" : "GC/memory"}: ${worstGc.name} avg ${formatNumber(worstGc.avgTimeMs)}ms · ${signal?.title ?? parsed.interpretation}`
       : parsed.interpretation ?? "-";
   }
+  if (tool === "evidence_links") {
+    const links = parsed.strongestLinks ?? [];
+    return `${language.value === "zh" ? "跨证据联动" : "Evidence links"}: ${links.slice(0, 4).map((item: any) => `${confidenceDisplayName(item.strength)} ${item.kind}:${item.id}`).join(" · ")}`;
+  }
   if (tool === "diagnostic_hypotheses") {
     return `${language.value === "zh" ? "候选结论" : "Hypotheses"}: ${(parsed.hypotheses ?? []).slice(0, 4).map((item: any) => `${hypothesisDisplayName(item.id)}(${confidenceDisplayName(item.confidence)})`).join(" · ")}`;
   }
@@ -929,6 +933,7 @@ function toolDisplayName(tool: string) {
     entity_chunks: "定位实体密集区块",
     heap: "分析堆内存",
     memory_gc: "分析 GC/内存",
+    evidence_links: "串联跨层证据",
     diagnostic_hypotheses: "生成候选结论",
     evidence_gaps: "检查证据缺口",
     raw_field: "读取原始字段",
@@ -947,6 +952,7 @@ function toolDisplayName(tool: string) {
     entity_chunks: "Locate Dense Entity Chunks",
     heap: "Analyze Heap",
     memory_gc: "Analyze GC/Memory",
+    evidence_links: "Link Cross-Layer Evidence",
     diagnostic_hypotheses: "Build Diagnostic Hypotheses",
     evidence_gaps: "Check Evidence Gaps",
     raw_field: "Read Raw Field",
@@ -970,6 +976,7 @@ function toolIntent(tool: string, args: any) {
     entity_chunks: `查找实体数量最高的区块和区块内实体类型${limit}。`,
     heap: `读取 heap 对象排行${limit}。`,
     memory_gc: "读取堆、内存池和 GC 聚合统计，判断是否存在 GC 暂停或频率异常。",
+    evidence_links: `把热点路径、模组来源、实体区块、最坏窗口和 GC/内存信号串成跨层证据${limit}。`,
     diagnostic_hypotheses: "把热点、模组来源、实体区块和时间窗口交叉成候选结论。",
     evidence_gaps: "检查当前报告还能证明什么、不能证明什么，以及下一步该补采什么。",
     raw_field: `读取原始字段 ${args?.path ?? ""}。`,
@@ -988,6 +995,7 @@ function toolIntent(tool: string, args: any) {
     entity_chunks: `Find chunks with the highest entity density and their entity mixes${limit}.`,
     heap: `Read heap object rankings${limit}.`,
     memory_gc: "Read heap, memory pools, and GC aggregate statistics to detect pause/frequency anomalies.",
+    evidence_links: `Link hot paths, mod sources, entity chunks, worst windows, and GC/memory signals${limit}.`,
     diagnostic_hypotheses: "Cross-check hotspots, mod sources, entity chunks, and windows into candidate conclusions.",
     evidence_gaps: "Check what the report can prove, cannot prove, and what to capture next.",
     raw_field: `Read raw field ${args?.path ?? ""}.`,
