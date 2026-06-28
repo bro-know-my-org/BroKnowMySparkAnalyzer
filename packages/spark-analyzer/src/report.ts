@@ -77,10 +77,13 @@ export type ReportDocument = {
 
 let protobufRoot: protobuf.Root | null = null;
 const HOT_PATH_MAX_DEPTH = 64;
-const HOT_PATH_ANCHOR_LIMIT = 24;
-const HOT_PATH_CALL_CHAIN_LIMIT = 32;
-const HOT_PATH_BRANCH_WIDTH = 8;
-const HOT_PATH_BEAM_WIDTH = 48;
+const HOT_PATH_ANCHOR_LIMIT = 40;
+const HOT_PATH_CALL_CHAIN_LIMIT = 48;
+const HOT_PATH_MIN_BRANCH_WIDTH = 8;
+const HOT_PATH_BRANCH_WIDTH = 16;
+const HOT_PATH_BRANCH_COVERAGE = 0.92;
+const HOT_PATH_MIN_CHILD_SHARE_OF_PARENT = 0.02;
+const HOT_PATH_BEAM_WIDTH = 96;
 
 export async function parseReportBytes(
   bytes: Uint8Array,
@@ -216,6 +219,8 @@ export function executeReportTool(
       };
     case "memory_gc":
       return summarizeMemoryGc(report);
+    case "evidence_links":
+      return buildEvidenceLinks(report, numberArg(args.limit, 16));
     case "diagnostic_hypotheses":
       return buildDiagnosticHypotheses(report);
     case "evidence_gaps":
@@ -233,7 +238,7 @@ export function reportToolDescriptions() {
     { name: "environment", args: {}, description: "报告内记录的平台、系统、Java/JVM、服务器配置和来源清单" },
     { name: "hotspots", args: { limit: 16 }, description: "CPU profile 热点帧" },
     { name: "hotspot_groups", args: { limit: 20 }, description: "按类别、包名、线程聚合 CPU 热点，降低框架帧噪声" },
-    { name: "hot_paths", args: { category: "auto", limit: 24 }, description: "自动选择高占比热点类别并向下展开子路径，定位具体类和功能帧" },
+    { name: "hot_paths", args: { category: "auto", limit: 64 }, description: "自动选择高占比热点类别并向下展开子路径，定位具体类和功能帧" },
     { name: "mod_sources", args: { limit: 24 }, description: "利用 class_sources/method_sources/metadata.sources 做模组/来源归因" },
     { name: "time_windows", args: { limit: 50 }, description: "spark 时间窗口统计" },
     { name: "worst_windows", args: { limit: 12 }, description: "按 MSPT max/median/TPS 排序的最坏窗口和前后变化" },
@@ -241,6 +246,7 @@ export function reportToolDescriptions() {
     { name: "entity_chunks", args: { limit: 24 }, description: "按实体数量排序的世界/区块热点和区块内实体类型" },
     { name: "heap", args: { limit: 24 }, description: "heap summary 对象排行" },
     { name: "memory_gc", args: {}, description: "堆/内存池/GC 聚合统计和异常信号" },
+    { name: "evidence_links", args: { limit: 16 }, description: "把 hot_paths、mod_sources、entity_chunks、worst_windows 等证据按来源/实体/类别串联" },
     { name: "diagnostic_hypotheses", args: {}, description: "本地规则生成的诊断假设、证据、反证和下一步动作" },
     { name: "evidence_gaps", args: {}, description: "当前报告能/不能证明什么，以及需要补采的报告类型" },
     { name: "raw_field", args: { path: "metadata.platformStatistics", maxItems: 80 }, description: "读取指定 raw 字段" },
@@ -1000,6 +1006,7 @@ function buildDiagnosticHypotheses(report: ReportDocument) {
   const windows = summarizeWorstWindows(report, 6);
   const gaps = buildEvidenceGaps(report);
   const hotPaths = summarizeHotPaths(report, "auto", 64);
+  const evidenceLinks = buildEvidenceLinks(report, 12);
   const hotPathAttribution = hotPaths.attribution as AnyRecord | undefined;
   const hypotheses: AnyRecord[] = [];
   const categoryMap = new Map((groups.byCategory as AnyRecord[]).map((entry) => [entry.category, entry]));
@@ -1016,6 +1023,29 @@ function buildDiagnosticHypotheses(report: ReportDocument) {
     .filter((source) => source.sourceId !== "unknown")
     .filter((source) => !isWrapperSource(source.sourceId, source.sourceName))
     .slice(0, 12);
+  const categoryLoadProfile = buildCategoryLoadProfile(groups);
+  if (categoryLoadProfile.majorCategories.length) {
+    hypotheses.push({
+      id: "server_thread_category_load_profile",
+      confidence: categoryLoadProfile.majorCategories.length >= 2 ? "high" : "medium",
+      conclusion: categoryLoadProfile.majorCategories.length >= 2
+        ? "主线程负载由多个显著热点类别共同构成，结论不能只写最高一类"
+        : "主线程负载有一个明显最高热点类别，但仍需检查次级类别",
+      evidence: [
+        `dominant: ${categoryLoadProfile.dominant ? `${categoryLoadProfile.dominant.category} ${formatPercent(categoryLoadProfile.dominant.maxPercent)}` : "none"}`,
+        `major categories: ${categoryLoadProfile.majorCategories.map((category) => `${category.category} ${formatPercent(category.maxPercent)}`).join(", ")}`,
+        `secondary categories: ${categoryLoadProfile.secondaryCategories.map((category) => `${category.category} ${formatPercent(category.maxPercent)}`).join(", ") || "none"}`,
+      ],
+      limitations: [
+        "类别占比来自 sampled inclusive frames；它表示主线程热点分布，不等于精确独占 CPU。",
+        "最高类别可以称为主导项，但不能覆盖其他超过显著阈值的类别。",
+      ],
+      nextActions: [
+        "最终结论按 dominant / major / secondary 分层列出，而不是只列一个主因。",
+        "对每个 major category 都引用 hot_paths byCategory 的终端帧或说明当前未解析到终端来源。",
+      ],
+    });
+  }
   const hotPathCategoryEvidence = ((hotPathAttribution?.byCategory ?? []) as AnyRecord[])
     .map((entry) => {
       const sourcesByCategory = ((entry.topSources ?? []) as AnyRecord[])
@@ -1314,8 +1344,315 @@ function buildDiagnosticHypotheses(report: ReportDocument) {
   return {
     hypotheses: sortedHypotheses,
     strongest: sortedHypotheses[0] ?? null,
+    categoryLoadProfile,
+    evidenceLinks: evidenceLinks.strongestLinks,
     evidenceGaps: gaps,
   };
+}
+
+function buildCategoryLoadProfile(groups: AnyRecord) {
+  const actionable = ((groups.byCategory ?? []) as AnyRecord[])
+    .filter((group) => isActionableHotPathCategory(String(group.category ?? "")) || String(group.category ?? "") === "world_tick")
+    .sort((left, right) => Number(right.maxPercent ?? 0) - Number(left.maxPercent ?? 0));
+  const dominant = actionable[0] ?? null;
+  const dominantPercent = Number(dominant?.maxPercent ?? 0);
+  const majorCategories = actionable.filter((group) => {
+    const percent = Number(group.maxPercent ?? 0);
+    return percent >= 10 || (dominantPercent > 0 && percent >= dominantPercent * 0.25);
+  }).slice(0, 8);
+  const secondaryCategories = actionable
+    .filter((group) => !majorCategories.includes(group) && Number(group.maxPercent ?? 0) >= 3)
+    .slice(0, 8);
+  return {
+    dominant,
+    majorCategories,
+    secondaryCategories,
+    rule: "major = maxPercent >= 10% or at least 25% of dominant category; secondary = remaining actionable categories >= 3%.",
+  };
+}
+
+function buildEvidenceLinks(report: ReportDocument, limit: number) {
+  const groups = summarizeHotspotGroups(report, Math.max(limit, 16));
+  const sources = summarizeModSources(report, Math.max(limit * 4, 64));
+  const chunks = summarizeEntityChunks(report, Math.max(limit, 24));
+  const windows = summarizeWorstWindows(report, 6);
+  const hotPaths = summarizeHotPaths(report, "auto", Math.max(limit * 4, 64));
+  const memoryGc = summarizeMemoryGc(report);
+  const hotPathAttribution = hotPaths.attribution as AnyRecord | undefined;
+  const namespaceStats = summarizeEntityNamespaces(chunks);
+  const categoryMap = new Map((groups.byCategory as AnyRecord[]).map((entry) => [String(entry.category), entry]));
+  const modSourcesById = new Map(((sources.topSources ?? []) as AnyRecord[]).map((source) => [String(source.sourceId), source]));
+  const links: AnyRecord[] = [];
+
+  for (const family of collectRecurringFrameFamilies(hotPaths, report.summary.topHotspots ?? [], limit)) {
+    links.push({
+      kind: "recurring_frame_family",
+      id: family.id,
+      title: `${family.name} appears as a repeated frame family across hot paths`,
+      strength: confidenceFromEvidence([
+        family.occurrences >= 4,
+        family.categories.length >= 2 || family.pathCount >= 3,
+        family.maxPercent >= 1,
+      ]),
+      categories: family.categories,
+      evidenceSources: evidenceSourceNames(["hot_paths", family.fromHotspots ? "hotspots" : ""]),
+      evidence: [
+        `${family.name}: ${family.occurrences} frames across ${family.pathCount} hot path contexts, max ${formatPercent(family.maxPercent)}`,
+        `categories: ${family.categories.join(", ") || "unknown"}`,
+        `examples: ${family.examples.map((item: AnyRecord) => `${item.category}:${item.label} ${formatPercent(item.percent)}`).join("; ")}`,
+      ],
+      interpretation: "同一帧族反复散落在多个峰/层级时，应作为横向重复模式看待；它可能比任意单个窄块更重要。",
+    });
+  }
+
+  for (const source of ((hotPathAttribution?.topSources ?? []) as AnyRecord[]).slice(0, limit * 2)) {
+    const sourceId = String(source.sourceId ?? "unknown");
+    if (sourceId === "unknown" || isWrapperSource(sourceId, source.sourceName)) continue;
+    const modSource = modSourcesById.get(sourceId);
+    const namespace = bestNamespaceMatch({ sourceId, name: source.sourceName }, namespaceStats);
+    const namespaceChunks = namespace ? namespaceStats.get(namespace)?.chunks ?? [] : [];
+    const matchedEntities = [
+      ...((source.matchedEntities ?? []) as AnyRecord[]).map((entity) => entity.entityId),
+      ...matchingEntityFramesForSource(modSource ?? {}, namespaceChunks),
+    ].filter(Boolean);
+    const categories = ((source.categories ?? []) as string[]).filter(Boolean);
+    const categoryEvidence = categories
+      .map((category) => categoryMap.get(category))
+      .filter((group): group is AnyRecord => Boolean(group))
+      .map((group: AnyRecord) => `${group.category} ${formatPercent(group.maxPercent)}`);
+    const evidence = [
+      `hot_paths source ${source.sourceName ?? sourceId} ${formatPercent(source.maxPercent)} in ${categories.join(", ") || "unknown category"}`,
+      modSource ? `mod_sources max ${formatPercent(modSource.maxPercent)} frames: ${frameLabels(modSource.frames).join("; ")}` : "",
+      categoryEvidence.length ? `hotspot_groups: ${categoryEvidence.join("; ")}` : "",
+      namespaceChunks.length ? `entity_chunks same namespace ${namespace}: ${namespaceChunks.slice(0, 2).map(formatChunkEvidence).join(" | ")}` : "",
+      matchedEntities.length ? `matched entities: ${[...new Set(matchedEntities)].slice(0, 6).join(", ")}` : "",
+    ].filter(Boolean);
+    links.push({
+      kind: "source",
+      id: sourceId,
+      title: `${source.sourceName ?? sourceId} appears across hot path evidence`,
+      strength: confidenceFromEvidence([
+        Number(source.maxPercent ?? 0) >= 1,
+        Boolean(modSource),
+        Boolean(categoryEvidence.length),
+        Boolean(namespaceChunks.length || matchedEntities.length),
+      ]),
+      categories,
+      evidenceSources: evidenceSourceNames([
+        "hot_paths",
+        modSource ? "mod_sources" : "",
+        categoryEvidence.length ? "hotspot_groups" : "",
+        namespaceChunks.length || matchedEntities.length ? "entity_chunks" : "",
+      ]),
+      evidence,
+      interpretation: modSource
+        ? "同一来源同时出现在 hot_paths 终端帧和 mod_sources，优先级高。"
+        : "来源来自 hot_paths 终端帧；即使 mod_sources 未单独汇总，也应作为路径候选。",
+    });
+  }
+
+  for (const candidate of ((hotPathAttribution?.entityCandidates ?? []) as AnyRecord[]).slice(0, limit * 2)) {
+    const entityId = String(candidate.entityId ?? "");
+    if (!entityId) continue;
+    const matchingChunks = chunksForEntity(chunks, entityId);
+    links.push({
+      kind: "entity",
+      id: entityId,
+      title: `${entityId} links terminal entity frames with world distribution`,
+      strength: confidenceFromEvidence([
+        candidate.confidence === "high",
+        Number(candidate.percent ?? 0) >= 0.5,
+        matchingChunks.length > 0,
+      ]),
+      categories: [candidate.category].filter(Boolean),
+      evidenceSources: evidenceSourceNames(["hot_paths", matchingChunks.length ? "entity_chunks" : ""]),
+      evidence: [
+        `hot_paths entity candidate via ${candidate.sourceName ?? candidate.sourceId}:${candidate.label} ${formatPercent(candidate.percent)} (${candidate.confidence})`,
+        matchingChunks.length
+          ? `entity_chunks locations: ${matchingChunks.slice(0, 3).map(formatChunkEvidence).join(" | ")}`
+          : "entity_chunks did not show this entity type in top dense chunks",
+      ],
+      interpretation: matchingChunks.length
+        ? "实体类型既在 CPU 终端帧中出现，也有现场分布线索；可以优先现场复测。"
+        : "这是 CPU 类级候选，但当前报告没有给出密集现场位置。",
+    });
+  }
+
+  const worst = (windows.worstByMaxMspt as AnyRecord[])[0];
+  for (const group of (groups.byCategory as AnyRecord[]).slice(0, limit)) {
+    const category = String(group.category ?? "");
+    if (!isActionableHotPathCategory(category) && category !== "world_tick") continue;
+    const deltas = worst?.deltas ?? {};
+    const hasWindowSupport = (
+      (category === "chunk_task" && Math.abs(Number(deltas.chunksFromPrevious ?? 0)) >= 100) ||
+      (category === "entity_tick" && Math.abs(Number(deltas.entitiesFromPrevious ?? 0)) >= 50) ||
+      Number(worst?.msptMax ?? 0) >= 200
+    );
+    links.push({
+      kind: "category_window",
+      id: category,
+      title: `${category} category against worst MSPT windows`,
+      strength: confidenceFromEvidence([
+        Number(group.maxPercent ?? 0) >= 10,
+        hasWindowSupport,
+        Boolean(worst),
+      ]),
+      categories: [category],
+      evidenceSources: evidenceSourceNames(["hotspot_groups", "worst_windows"]),
+      evidence: [
+        `hotspot_groups ${category} max ${formatPercent(group.maxPercent)}, samples ${group.samples}`,
+        worst ? `worst window ${worst.id}: max MSPT ${formatNumber(worst.msptMax)}, entity delta ${deltas.entitiesFromPrevious ?? "-"}, chunk delta ${deltas.chunksFromPrevious ?? "-"}` : "no worst window data",
+      ],
+      interpretation: hasWindowSupport
+        ? "类别热点和最坏窗口指标有同向线索，但时间窗口仍是粗粒度证据。"
+        : "类别热点成立；当前窗口指标没有提供明确同向变化。",
+    });
+  }
+
+  const severeGcSignals = ((memoryGc.signals ?? []) as AnyRecord[]).filter((signal) => signal.category === "gc" && signal.severity !== "info");
+  if (severeGcSignals.length || Number(worst?.msptMax ?? 0) >= 200) {
+    links.push({
+      kind: "runtime_window",
+      id: "gc_memory_vs_spikes",
+      title: "GC/memory signals compared with worst windows",
+      strength: confidenceFromEvidence([
+        severeGcSignals.some((signal) => signal.severity === "critical"),
+        severeGcSignals.length > 0,
+        Boolean(worst),
+      ]),
+      categories: ["memory_gc"],
+      evidenceSources: evidenceSourceNames(["memory_gc", worst ? "worst_windows" : ""]),
+      evidence: [
+        ...(severeGcSignals.slice(0, 3).map((signal) => `${signal.title}: ${signal.detail}`)),
+        worst ? `worst window ${worst.id}: max MSPT ${formatNumber(worst.msptMax)}` : "no worst window data",
+      ],
+      interpretation: "GC 聚合信号和窗口尖峰只能形成待验证联动；需要 GC 日志时间戳才能证明同一时刻发生。",
+    });
+  }
+
+  const strongestLinks = links
+    .sort((left, right) =>
+      confidenceRank(right.strength) - confidenceRank(left.strength) ||
+      Number(right.evidenceSources?.length ?? 0) - Number(left.evidenceSources?.length ?? 0),
+    )
+    .slice(0, limit);
+
+  return {
+    strongestLinks,
+    byKind: groupEvidenceLinksByKind(strongestLinks),
+    selectedCategories: hotPaths.selectedCategories ?? [],
+    notes: [
+      "A strong link means the same source/entity/category appears in multiple report views; it is still sampled evidence, not proof of a single instance.",
+      "category_window links are coarse because spark time windows are not per-stack timestamps.",
+      "runtime_window GC links require external GC logs for exact spike correlation.",
+    ],
+  };
+}
+
+function evidenceSourceNames(names: string[]) {
+  return [...new Set(names.filter(Boolean))];
+}
+
+function collectRecurringFrameFamilies(hotPaths: AnyRecord, hotspots: StackHotspot[], limit: number): AnyRecord[] {
+  const byFamily = new Map<string, AnyRecord>();
+  const addFrame = (frame: AnyRecord, context: string, fallbackCategory = "") => {
+    const label = String(frame.label ?? frame.terminalLabel ?? "");
+    if (!label || isGenericFrame(label) || isMinecraftLoopFrame(label)) return;
+    const family = recurringFrameFamily(frame, label);
+    if (!family) return;
+    const category = String(frame.category ?? fallbackCategory ?? classifyFrame(label));
+    const percent = Number(frame.percent ?? frame.maxPercent ?? frame.terminalPercent ?? 0);
+    const entry = byFamily.get(family.id) ?? {
+      ...family,
+      occurrences: 0,
+      maxPercent: 0,
+      categories: [] as string[],
+      contexts: [] as string[],
+      examples: [] as AnyRecord[],
+      fromHotspots: false,
+    };
+    entry.occurrences += 1;
+    entry.maxPercent = Math.max(Number(entry.maxPercent ?? 0), percent);
+    if (category && !entry.categories.includes(category)) entry.categories.push(category);
+    if (context && !entry.contexts.includes(context)) entry.contexts.push(context);
+    if (context === "hotspots") entry.fromHotspots = true;
+    if (entry.examples.length < 6 && label) {
+      entry.examples.push({ label, category, percent, context });
+    }
+    byFamily.set(family.id, entry);
+  };
+
+  for (const categoryResult of (hotPaths.categories ?? []) as AnyRecord[]) {
+    const category = String(categoryResult.category ?? "");
+    for (const frame of (categoryResult.frames ?? []) as AnyRecord[]) addFrame(frame, `frames:${category}`, category);
+    for (const chain of (categoryResult.callChains ?? []) as AnyRecord[]) {
+      for (const frame of (chain.path ?? []) as AnyRecord[]) addFrame(frame, `callChain:${category}`, category);
+    }
+    for (const path of (categoryResult.dominantPaths ?? []) as AnyRecord[]) {
+      for (const frame of (path.frames ?? []) as AnyRecord[]) addFrame(frame, `dominantPath:${category}`, category);
+      for (const branch of (path.branchPoints ?? []) as AnyRecord[]) {
+        for (const child of (branch.children ?? []) as AnyRecord[]) addFrame(child, `branch:${category}`, category);
+      }
+    }
+  }
+
+  for (const frame of hotspots.slice(0, Math.max(limit * 3, 48))) {
+    addFrame(frame, "hotspots", classifyHotspot(frame));
+  }
+
+  return ([...byFamily.values()] as AnyRecord[])
+    .map((entry: AnyRecord) => ({
+      ...entry,
+      pathCount: entry.contexts.length,
+      categories: entry.categories.slice(0, 8),
+      examples: entry.examples
+        .sort((left: AnyRecord, right: AnyRecord) => Number(right.percent ?? 0) - Number(left.percent ?? 0))
+        .slice(0, 6),
+    }))
+    .filter((entry: AnyRecord) => entry.occurrences >= 3 && entry.pathCount >= 2)
+    .sort((left: AnyRecord, right: AnyRecord) =>
+      Number(right.occurrences ?? 0) - Number(left.occurrences ?? 0) ||
+      Number(right.maxPercent ?? 0) - Number(left.maxPercent ?? 0),
+    )
+    .slice(0, limit);
+}
+
+function recurringFrameFamily(frame: AnyRecord, label: string) {
+  const sourceId = String(frame.sourceId ?? frame.terminalSourceId ?? "unknown");
+  const sourceName = String(frame.sourceName ?? frame.terminalSourceName ?? sourceId);
+  if (sourceId !== "unknown" && !isWrapperSource(sourceId, sourceName)) {
+    return { id: `source:${sourceId}`, name: sourceName || sourceId };
+  }
+
+  const className = String(frame.className ?? classNameFromLabel(label));
+  const parts = className.split(".").filter(Boolean);
+  if (!parts.length) return null;
+  const root = parts[0].toLowerCase();
+  if (["java", "javax", "jdk", "sun", "net", "nms", "nm"].includes(root)) return null;
+  const key = parts.length <= 2
+    ? parts.join(".")
+    : (["com", "org", "io", "me"].includes(root) ? parts.slice(0, 3).join(".") : parts[0]);
+  if (!key || key.length < 4) return null;
+  return { id: `package:${key}`, name: key };
+}
+
+function groupEvidenceLinksByKind(links: AnyRecord[]) {
+  const grouped: AnyRecord = {};
+  for (const link of links) {
+    const kind = String(link.kind ?? "other");
+    grouped[kind] = [...(grouped[kind] ?? []), link];
+  }
+  return grouped;
+}
+
+function chunksForEntity(chunks: AnyRecord, entityId: string) {
+  const normalized = normalizeToken(entityId.split(":").at(-1) ?? entityId);
+  return ((chunks.topChunks ?? []) as AnyRecord[]).filter((chunk) =>
+    ((chunk.topEntities ?? []) as NamedValue[]).some((entity) => {
+      const value = String(entity.name ?? "");
+      return value === entityId || normalizeToken(value.split(":").at(-1) ?? value) === normalized;
+    }),
+  );
 }
 
 function buildEvidenceGaps(report: ReportDocument) {
@@ -1727,6 +2064,30 @@ function summarizeDominantFlamePaths(
     .slice(0, limit);
 }
 
+function selectDominantBranchChildren(
+  children: Array<{ index: number; node: AnyRecord; samples: number }>,
+  parentSamples: number,
+) {
+  const selected: Array<{ index: number; node: AnyRecord; samples: number }> = [];
+  let coveredShare = 0;
+
+  for (const child of children) {
+    const shareOfParent = parentSamples > 0 ? child.samples / parentSamples : 0;
+    const shouldKeep = selected.length < HOT_PATH_MIN_BRANCH_WIDTH || (
+      selected.length < HOT_PATH_BRANCH_WIDTH &&
+      (coveredShare < HOT_PATH_BRANCH_COVERAGE || shareOfParent >= HOT_PATH_MIN_CHILD_SHARE_OF_PARENT)
+    );
+    if (!shouldKeep) break;
+    selected.push(child);
+    coveredShare += shareOfParent;
+  }
+
+  return {
+    children: selected.length ? selected : children.slice(0, Math.min(children.length, HOT_PATH_MIN_BRANCH_WIDTH)),
+    coveredShare,
+  };
+}
+
 function followDominantBranches(
   anchor: {
     thread: string;
@@ -1775,19 +2136,23 @@ function followDominantBranches(
         continue;
       }
 
+      const parentSamples = sumTimes(node.times);
+      const selectedChildren = selectDominantBranchChildren(children, parentSamples);
       const branchPoint = {
         depth,
         parent: formatStackLabel(node),
-        children: children.slice(0, HOT_PATH_BRANCH_WIDTH).map((child) => {
+        coveredShare: selectedChildren.coveredShare,
+        omittedChildren: Math.max(0, children.length - selectedChildren.children.length),
+        children: selectedChildren.children.map((child) => {
           const entry = flameFrame(child.node, anchor.threadSamples, classSources, methodSources, lineSources, sourceMetadata);
           return {
             ...entry,
-            childShareOfParent: sumTimes(node.times) > 0 ? child.samples / sumTimes(node.times) : 0,
+            childShareOfParent: parentSamples > 0 ? child.samples / parentSamples : 0,
           };
         }),
       };
 
-      for (const child of children.slice(0, HOT_PATH_BRANCH_WIDTH)) {
+      for (const child of selectedChildren.children) {
         next.push({
           index: child.index,
           frames: [
