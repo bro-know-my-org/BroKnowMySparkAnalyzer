@@ -74,6 +74,14 @@ pnpm run dev:web
 http://127.0.0.1:1420
 ```
 
+纯 Web 版本与桌面版共用同一套分析界面和报告逻辑。浏览器中可直接上传并本地解析 spark 报告、运行可视化分析、导出 Markdown/PNG，并在 AI provider 支持 CORS 时直接调用 AI。构建静态站点：
+
+```powershell
+pnpm run build:web
+```
+
+产物位于 `dist`，可以部署到 GitHub Pages、Cloudflare Pages、Vercel 或任意静态文件服务。远程 spark 链接若被浏览器 CORS 拦截，可改用本地上传，或在构建时配置 `VITE_SPARK_PROXY_URL` 指向受信任的白名单代理。
+
 ### 构建
 
 ```powershell
@@ -244,6 +252,14 @@ The local Vite URL is:
 ```text
 http://127.0.0.1:1420
 ```
+
+The pure Web build shares the analyzer UI and report logic with the desktop app. It can parse local spark reports, render visual summaries, export Markdown/PNG, and call AI providers directly when they allow CORS:
+
+```powershell
+pnpm run build:web
+```
+
+Deploy the generated `dist` directory to GitHub Pages, Cloudflare Pages, Vercel, or any static host. If browser CORS blocks remote spark URLs, use local upload or set `VITE_SPARK_PROXY_URL` at build time to a trusted allow-listed proxy.
 
 ### Build
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Github, Language } from "@vicons/fa";
+import DOMPurify from "dompurify";
 import { toPng } from "html-to-image";
 import { marked } from "marked";
 import {
@@ -96,7 +97,7 @@ const copy = {
       clear: "清空",
       debug: "Debug",
       report: "报告",
-      reportTip: "拖入 .sparkprofile 或 .sparkheap；Tauri 已关闭窗口级拖拽捕获。",
+      reportTip: "拖入 .sparkprofile 或 .sparkheap；文件仅在本机解析，不会上传。",
       dropTitle: "拖入 spark 报告",
       dropHint: ".sparkprofile / .sparkheap / health protobuf",
       sourcePlaceholder: "Spark 报告链接 / bytebin key",
@@ -121,6 +122,11 @@ const copy = {
       heap: "堆内存",
       entities: "实体",
       reportStatus: "报告状态",
+      visualOverview: "可视化概览",
+      cpuHotspots: "CPU 热点",
+      entityLoad: "实体分布",
+      heapObjects: "堆内存对象",
+      noVisualData: "载入 spark profile 或 heap 报告后显示热点排行。",
       reportEnvironment: "报告内环境",
       platform: "平台",
       java: "Java",
@@ -190,7 +196,7 @@ const copy = {
       clear: "Clear",
       debug: "Debug",
       report: "Report",
-      reportTip: "Drop .sparkprofile or .sparkheap files. Tauri window drag capture is disabled.",
+      reportTip: "Drop .sparkprofile or .sparkheap files. Files are parsed locally and are not uploaded.",
       dropTitle: "Drop spark report",
       dropHint: ".sparkprofile / .sparkheap / health protobuf",
       sourcePlaceholder: "spark viewer URL / bytebin key",
@@ -215,6 +221,11 @@ const copy = {
       heap: "Heap",
       entities: "Entities",
       reportStatus: "Report Status",
+      visualOverview: "Visual Overview",
+      cpuHotspots: "CPU Hotspots",
+      entityLoad: "Entity Distribution",
+      heapObjects: "Heap Objects",
+      noVisualData: "Load a spark profile or heap report to see hotspot rankings.",
       reportEnvironment: "Report Environment",
       platform: "Platform",
       java: "Java",
@@ -365,7 +376,53 @@ const canAnalyze = computed(() => Boolean(report.value && baseUrl.value && model
 const canAskFollowUp = computed(() => Boolean(report.value && aiOutput.value && followUpInput.value.trim() && !followUpBusy.value && !busy.value));
 const renderedMarkdown = computed(() => {
   const source = aiOutput.value || t.value.ui.noDiagnosis;
-  return marked.parse(source, { async: false }) as string;
+  return renderMarkdown(source);
+});
+const visualSections = computed(() => {
+  const sections: Array<{
+    key: string;
+    title: string;
+    bars: Array<{ label: string; value: string; width: number }>;
+  }> = [];
+  const hotspots = (summary.value?.topHotspots ?? []).slice(0, 8);
+  if (hotspots.length) {
+    sections.push({
+      key: "hotspots",
+      title: t.value.ui.cpuHotspots,
+      bars: hotspots.map((item) => ({
+        label: item.label,
+        value: `${formatNumber(item.percent)}%`,
+        width: Math.max(3, Math.min(100, item.percent)),
+      })),
+    });
+  }
+  const entities = (summary.value?.topEntities ?? []).slice(0, 8);
+  const maxEntities = Math.max(...entities.map((item) => item.value), 1);
+  if (entities.length) {
+    sections.push({
+      key: "entities",
+      title: t.value.ui.entityLoad,
+      bars: entities.map((item) => ({
+        label: item.name,
+        value: formatNumber(item.value),
+        width: Math.max(3, (item.value / maxEntities) * 100),
+      })),
+    });
+  }
+  const heap = (summary.value?.topHeap ?? []).slice(0, 8);
+  const maxHeap = Math.max(...heap.map((item) => item.bytes), 1);
+  if (heap.length) {
+    sections.push({
+      key: "heap",
+      title: t.value.ui.heapObjects,
+      bars: heap.map((item) => ({
+        label: item.type,
+        value: formatBytes(item.bytes),
+        width: Math.max(3, (item.bytes / maxHeap) * 100),
+      })),
+    });
+  }
+  return sections;
 });
 const reportEnvironment = computed<AnyRecord | null>(() => {
   if (!report.value) return null;
@@ -660,7 +717,13 @@ function clearAll() {
 }
 
 function renderFollowUp(content: string) {
-  return marked.parse(content, { async: false }) as string;
+  return renderMarkdown(content);
+}
+
+function renderMarkdown(content: string) {
+  return DOMPurify.sanitize(marked.parse(content, { async: false }) as string, {
+    USE_PROFILES: { html: true },
+  });
 }
 
 function diagnosisMarkdown() {
@@ -729,8 +792,12 @@ async function exportDiagnosisImage() {
   }
 }
 
-function openGitHub() {
-  void props.adapter.openUrl("https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer");
+async function openGitHub() {
+  try {
+    await props.adapter.openUrl("https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer");
+  } catch (error) {
+    message.error(String(error));
+  }
 }
 
 function stringToBase64(value: string) {
@@ -1261,7 +1328,31 @@ const InfoTip = (props: { text: string }) =>
               <n-statistic :label="t.ui.entities" :value="summary?.entityCount === undefined ? '-' : formatNumber(summary.entityCount)" />
             </section>
 
-            <section class="content-grid">
+            <section class="panel visual-overview">
+              <div class="panel-title compact">
+                <h2>{{ t.ui.visualOverview }}</h2>
+                <n-tag size="small" :bordered="false">{{ visualSections.length }}</n-tag>
+              </div>
+              <div v-if="visualSections.length" class="visual-grid">
+                <article v-for="section in visualSections" :key="section.key" class="visual-card">
+                  <h3>{{ section.title }}</h3>
+                  <div class="bar-list">
+                    <div v-for="bar in section.bars" :key="bar.label" class="bar-row">
+                      <div class="bar-meta">
+                        <span :title="bar.label">{{ bar.label }}</span>
+                        <strong>{{ bar.value }}</strong>
+                      </div>
+                      <div class="bar-track">
+                        <div class="bar-fill" :style="{ width: `${bar.width}%` }"></div>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="empty visual-empty">{{ t.ui.noVisualData }}</div>
+            </section>
+
+            <section class="content-grid mt-16">
               <div class="panel resizable-panel status-panel">
                 <div class="panel-title compact">
                   <h2>{{ t.ui.reportStatus }}</h2>

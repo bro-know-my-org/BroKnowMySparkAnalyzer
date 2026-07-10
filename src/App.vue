@@ -1,6 +1,6 @@
 <template>
   <div class="standalone-shell">
-    <header class="standalone-titlebar">
+    <header v-if="isDesktop" class="standalone-titlebar">
       <div class="standalone-title" data-tauri-drag-region @mousedown="startWindowDrag" @dblclick="toggleMaximizeWindow">
         <div class="title-stack">
           <div class="title-row">
@@ -22,34 +22,44 @@
       </div>
     </header>
 
-    <SparkAnalyzerView class="standalone-content" :adapter="sparkAnalyzerAdapter" embedded />
+    <SparkAnalyzerView class="standalone-content" :adapter="sparkAnalyzerAdapter" :embedded="isDesktop" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Dismiss20Regular, LineHorizontal120Regular, Maximize20Regular } from "@vicons/fluent";
 import { NIcon } from "naive-ui";
 import { SparkAnalyzerView } from "../packages/spark-analyzer/src";
-import { sparkAnalyzerAdapter } from "./sparkAnalyzerAdapter";
+import { isTauriRuntime, sparkAnalyzerAdapter } from "./sparkAnalyzerAdapter";
 
-const appWindow = getCurrentWindow();
+const isDesktop = isTauriRuntime();
+let appWindowPromise: ReturnType<typeof loadAppWindow> | undefined;
+
+async function loadAppWindow() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  return getCurrentWindow();
+}
+
+function appWindow() {
+  appWindowPromise ??= loadAppWindow();
+  return appWindowPromise;
+}
 
 function minimizeWindow() {
-  void appWindow.minimize();
+  void appWindow().then((window) => window.minimize());
 }
 
 function toggleMaximizeWindow() {
-  void appWindow.toggleMaximize();
+  void appWindow().then((window) => window.toggleMaximize());
 }
 
 function closeWindow() {
-  void appWindow.close();
+  void appWindow().then((window) => window.close());
 }
 
 function startWindowDrag(event: MouseEvent) {
   if (event.button !== 0 || event.detail > 1) return;
-  void appWindow.startDragging();
+  void appWindow().then((window) => window.startDragging());
 }
 </script>
 
@@ -64,7 +74,7 @@ function startWindowDrag(event: MouseEvent) {
 
 :global(body) {
   margin: 0;
-  min-width: 980px;
+  min-width: 0;
   background: var(--page);
 }
 
@@ -100,5 +110,22 @@ function startWindowDrag(event: MouseEvent) {
 .standalone-content {
   min-height: 0;
   flex: 1 1 auto;
+}
+
+@media (max-width: 820px) {
+  :global(html),
+  :global(body),
+  :global(#app) {
+    height: auto;
+    min-height: 100%;
+    overflow: auto;
+  }
+
+  .standalone-shell {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow: visible;
+  }
 }
 </style>

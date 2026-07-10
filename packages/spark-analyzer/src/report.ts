@@ -257,7 +257,8 @@ async function loadProtobufRoot() {
   if (protobufRoot) {
     return protobufRoot;
   }
-  protobufRoot = await protobuf.load(["/proto/spark_sampler.proto", "/proto/spark_heap.proto"]);
+  const baseUrl = import.meta.env.BASE_URL.endsWith("/") ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
+  protobufRoot = await protobuf.load([`${baseUrl}proto/spark_sampler.proto`, `${baseUrl}proto/spark_heap.proto`]);
   return protobufRoot;
 }
 

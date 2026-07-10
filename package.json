@@ -9,6 +9,7 @@
     "dev": "tauri dev",
     "dev:web": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
+    "build:web": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri"
   },
