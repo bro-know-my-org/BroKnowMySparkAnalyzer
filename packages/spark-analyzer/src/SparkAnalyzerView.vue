@@ -30,26 +30,13 @@ import {
   createDiscreteApi,
   type SelectOption,
 } from "naive-ui";
-import {
-  executeReportTool,
-  formatBytes,
-  formatNumber,
-  parseReportBytes,
-  parseTextReport,
-  type AnyRecord,
-  type ReportDocument,
-} from "./report";
-import {
-  askFollowUp,
-  listModels,
-  providerPresets,
-  runToolAgent,
-  testConnection,
-  type AgentTrace,
-  type AiConfig,
-  type FollowUpMessage,
-} from "./ai";
-import type { RemoteReport, SparkAnalyzerAdapter } from "./adapter";
+import type {
+  AgentTrace,
+  AiConfig,
+  FollowUpMessage,
+  LoadedReport,
+  SparkAnalyzerAdapter,
+} from "./adapter";
 
 const props = defineProps<{
   adapter: SparkAnalyzerAdapter;
@@ -64,6 +51,17 @@ const emit = defineEmits<{
 
 type Lang = "zh" | "en";
 type ThemeMode = "dark" | "light";
+type AnyRecord = Record<string, any>;
+type ProviderPreset = { id: string; name: string; baseUrl: string; model: string; customBaseUrl?: boolean };
+const providerPresets: ProviderPreset[] = [
+  { id: "custom", name: "Custom OpenAI-compatible", baseUrl: "", model: "", customBaseUrl: true },
+  { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { id: "moonshot", name: "Moonshot", baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k2-0711-preview" },
+  { id: "siliconflow", name: "SiliconFlow", baseUrl: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen3-235B-A22B-Instruct-2507" },
+  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini" },
+  { id: "newapi-happy", name: "NewAPI Happy (test)", baseUrl: "https://newapi.hello-happy.world/v1", model: "deepseek-v4-pro" },
+];
 type StatusKey =
   | "waiting"
   | "parsing"
@@ -106,7 +104,7 @@ const copy = {
       optionalTextInput: "可选：粘贴文本/日志",
       textPlaceholder: "粘贴日志或人工摘要",
       loadText: "载入文本",
-      aiTip: "OpenAI-compatible /chat/completions；保存配置只写入本机 localStorage，不会上传云端。",
+      aiTip: "OpenAI-compatible /chat/completions；桌面端 API Key 存入系统凭据库，其余设置仅保存在本机。",
       advancedAi: "高级 AI 设置",
       temperature: "温度",
       temperatureTip: "越低越稳定；性能诊断建议保持 0.2。",
@@ -205,7 +203,7 @@ const copy = {
       optionalTextInput: "Optional: paste text/logs",
       textPlaceholder: "Paste logs or manual notes",
       loadText: "Load Text",
-      aiTip: "OpenAI-compatible /chat/completions. Saved config stays in localStorage on this device and is not uploaded.",
+      aiTip: "OpenAI-compatible /chat/completions. Desktop API keys use the system credential store; other settings stay local.",
       advancedAi: "Advanced AI Settings",
       temperature: "Temperature",
       temperatureTip: "Lower is more stable. 0.2 is recommended for diagnostics.",
@@ -285,7 +283,8 @@ const { message } = createDiscreteApi(["message"], {
     theme: darkTheme,
   },
 });
-const report = ref<ReportDocument | null>(null);
+const report = ref<LoadedReport | null>(null);
+const reportEnvironment = ref<AnyRecord | null>(null);
 const statusKey = ref<StatusKey>("waiting");
 const sourceInput = ref("");
 const textInput = ref("");
@@ -294,6 +293,9 @@ const aiOutput = ref("");
 const traces = ref<AgentTrace[]>([]);
 const busy = ref(false);
 const analysisRunId = ref(0);
+const followUpRunId = ref(0);
+const loadRunId = ref(0);
+let componentAlive = true;
 const fetchingReport = ref(false);
 const testing = ref(false);
 const fetchingModels = ref(false);
@@ -342,7 +344,7 @@ function releaseAltPressed() {
 }
 
 onMounted(() => {
-  loadLocalAiConfig();
+  void loadLocalAiConfig();
   document.addEventListener("contextmenu", preventNativeContextMenu);
   window.addEventListener("keydown", updateAltPressed);
   window.addEventListener("keyup", updateAltPressed);
@@ -350,6 +352,13 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  componentAlive = false;
+  loadRunId.value += 1;
+  analysisRunId.value += 1;
+  followUpRunId.value += 1;
+  const reportId = report.value?.reportId;
+  if (reportId) void props.adapter.cancelAnalysis(reportId).catch(() => undefined);
+  void releaseCurrentReport();
   document.removeEventListener("contextmenu", preventNativeContextMenu);
   window.removeEventListener("keydown", updateAltPressed);
   window.removeEventListener("keyup", updateAltPressed);
@@ -423,14 +432,6 @@ const visualSections = computed(() => {
     });
   }
   return sections;
-});
-const reportEnvironment = computed<AnyRecord | null>(() => {
-  if (!report.value) return null;
-  try {
-    return executeReportTool(report.value, "environment", {}) as AnyRecord;
-  } catch {
-    return null;
-  }
 });
 const environmentRows = computed(() => {
   const env = reportEnvironment.value;
@@ -526,9 +527,12 @@ async function handleFiles(files: FileList | File[]) {
   const file = Array.from(files)[0];
   if (!file) return;
   statusKey.value = "parsing";
+  fetchingReport.value = false;
+  const loadId = ++loadRunId.value;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    report.value = await parseReportBytes(bytes, file.name, file.name);
+    const loaded = await props.adapter.loadReportBytes(bytes, file.name, file.name);
+    if (!(await installLoadedReport(loadId, loaded))) return;
     traces.value = [];
     aiOutput.value = "";
     followUps.value = [];
@@ -536,9 +540,48 @@ async function handleFiles(files: FileList | File[]) {
     statusKey.value = "loaded";
     message.success(`${t.value.msg.loaded} ${file.name}`);
   } catch (error) {
+    if (!componentAlive || loadRunId.value !== loadId) return;
     statusKey.value = "parseFailed";
     message.error(String(error));
   }
+}
+
+async function installLoadedReport(loadId: number, loaded: LoadedReport) {
+  if (!componentAlive || loadRunId.value !== loadId) {
+    await props.adapter.releaseReport(loaded.reportId).catch(() => undefined);
+    return false;
+  }
+  await replaceReport(loaded);
+  return componentAlive && loadRunId.value === loadId && report.value?.reportId === loaded.reportId;
+}
+
+async function replaceReport(next: LoadedReport) {
+  const previous = report.value;
+  analysisRunId.value += 1;
+  followUpRunId.value += 1;
+  if (previous && (busy.value || followUpBusy.value)) {
+    void props.adapter.cancelAnalysis(previous.reportId).catch(() => undefined);
+  }
+  busy.value = false;
+  followUpBusy.value = false;
+  report.value = next;
+  reportEnvironment.value = null;
+  if (previous && previous.reportId !== next.reportId) {
+    void props.adapter.releaseReport(previous.reportId).catch(() => undefined);
+  }
+  try {
+    const environment = await props.adapter.executeTool(next.reportId, "environment", {}) as AnyRecord;
+    if (report.value?.reportId === next.reportId) reportEnvironment.value = environment;
+  } catch {
+    if (report.value?.reportId === next.reportId) reportEnvironment.value = null;
+  }
+}
+
+async function releaseCurrentReport() {
+  const current = report.value;
+  report.value = null;
+  reportEnvironment.value = null;
+  if (current) await props.adapter.releaseReport(current.reportId).catch(() => undefined);
 }
 
 async function fetchRemoteReport() {
@@ -548,10 +591,10 @@ async function fetchRemoteReport() {
   }
   statusKey.value = "fetching";
   fetchingReport.value = true;
+  const loadId = ++loadRunId.value;
   try {
-    const remote: RemoteReport = await props.adapter.fetchReportFromUrl(sourceInput.value.trim());
-    const bytes = base64ToBytes(remote.bytes_base64);
-    report.value = await parseReportBytes(bytes, remote.resolved_url, `${remote.content_type} ${remote.resolved_url}`);
+    const loaded = await props.adapter.fetchReport(sourceInput.value.trim());
+    if (!(await installLoadedReport(loadId, loaded))) return;
     traces.value = [];
     aiOutput.value = "";
     followUps.value = [];
@@ -559,31 +602,41 @@ async function fetchRemoteReport() {
     statusKey.value = "loaded";
     message.success(t.value.msg.remoteLoaded);
   } catch (error) {
+    if (!componentAlive || loadRunId.value !== loadId) return;
     statusKey.value = "fetchFailed";
     message.error(String(error));
   } finally {
-    fetchingReport.value = false;
+    if (loadRunId.value === loadId) fetchingReport.value = false;
   }
 }
 
-function analyzeText() {
+async function analyzeText() {
   const text = textInput.value.trim();
   if (!text) {
     message.warning(t.value.msg.textRequired);
     return;
   }
-  report.value = parseTextReport(text);
-  traces.value = [];
-  aiOutput.value = "";
-  followUps.value = [];
-  followUpInput.value = "";
-  statusKey.value = "textLoaded";
+  const loadId = ++loadRunId.value;
+  fetchingReport.value = false;
+  try {
+    const loaded = await props.adapter.loadTextReport(text, "pasted text");
+    if (!(await installLoadedReport(loadId, loaded))) return;
+    traces.value = [];
+    aiOutput.value = "";
+    followUps.value = [];
+    followUpInput.value = "";
+    statusKey.value = "textLoaded";
+  } catch (error) {
+    if (!componentAlive || loadRunId.value !== loadId) return;
+    statusKey.value = "parseFailed";
+    message.error(String(error));
+  }
 }
 
 async function testAi() {
   testing.value = true;
   try {
-    const result = await testConnection(currentConfig(), props.adapter);
+    const result = await props.adapter.testAiConnection(currentConfig());
     message.success(`${t.value.msg.connected}: ${result.slice(0, 40) || "OK"}`);
   } catch (error) {
     message.error(String(error));
@@ -595,7 +648,7 @@ async function testAi() {
 async function fetchModels() {
   fetchingModels.value = true;
   try {
-    const models = await listModels(currentConfig(), props.adapter);
+    const models = await props.adapter.listAiModels(currentConfig());
     fetchedModels.value = models.map((item) => item.id).filter(Boolean);
     message.success(`${t.value.msg.modelsLoaded}: ${fetchedModels.value.length}`);
   } catch (error) {
@@ -619,12 +672,10 @@ async function runAnalysis() {
   followUpInput.value = "";
   statusKey.value = "analyzing";
   try {
-    const final = await runToolAgent(report.value, currentConfig(), (trace) => {
-      if (analysisRunId.value !== runId) return;
-      traces.value.push(trace);
-    }, props.adapter);
+    const result = await props.adapter.runAnalysis(report.value.reportId, currentConfig());
     if (analysisRunId.value !== runId) return;
-    aiOutput.value = final;
+    traces.value = result.traces ?? [];
+    aiOutput.value = result.diagnosis;
     statusKey.value = "done";
   } catch (error) {
     if (analysisRunId.value !== runId) return;
@@ -637,35 +688,56 @@ async function runAnalysis() {
   }
 }
 
-function loadLocalAiConfig() {
+async function loadLocalAiConfig() {
+  let raw: string | null = null;
+  let legacyApiKey = "";
+  let saved: (Partial<AiConfig> & { providerId?: string }) | undefined;
   try {
-    const raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
-    if (!raw) return;
-    const saved = JSON.parse(raw) as Partial<AiConfig> & { providerId?: string };
-    if (saved.providerId && providerPresets.some((preset) => preset.id === saved.providerId)) {
-      providerId.value = saved.providerId;
+    raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<AiConfig> & { providerId?: string };
+      saved = parsed;
+      if (parsed.providerId && providerPresets.some((preset) => preset.id === parsed.providerId)) {
+        providerId.value = parsed.providerId;
+      }
+      if (typeof parsed.base_url === "string") baseUrl.value = parsed.base_url;
+      if (typeof parsed.model === "string") model.value = parsed.model;
+      if (typeof parsed.temperature === "number" && Number.isFinite(parsed.temperature)) {
+        temperature.value = parsed.temperature;
+      }
+      if (typeof parsed.api_key === "string") legacyApiKey = parsed.api_key.trim();
     }
-    if (typeof saved.base_url === "string") baseUrl.value = saved.base_url;
-    if (typeof saved.api_key === "string") apiKey.value = saved.api_key;
-    if (typeof saved.model === "string") model.value = saved.model;
-    if (typeof saved.temperature === "number" && Number.isFinite(saved.temperature)) {
-      temperature.value = saved.temperature;
-    }
-    message.success(t.value.msg.aiConfigLoaded);
   } catch {
     window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
+    return;
   }
+  try {
+    apiKey.value = await props.adapter.loadApiKey() ?? legacyApiKey;
+    if (legacyApiKey && apiKey.value === legacyApiKey) await props.adapter.storeApiKey(legacyApiKey);
+    if (saved && "api_key" in saved) {
+      window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
+        providerId: saved.providerId,
+        base_url: saved.base_url,
+        model: saved.model,
+        temperature: saved.temperature,
+      }));
+    }
+  } catch {
+    apiKey.value = legacyApiKey;
+  }
+  if (raw || apiKey.value) message.success(t.value.msg.aiConfigLoaded);
 }
 
-function saveLocalAiConfig() {
+async function saveLocalAiConfig() {
   try {
     window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
       providerId: providerId.value,
       base_url: baseUrl.value.trim(),
-      api_key: apiKey.value.trim(),
       model: model.value.trim(),
       temperature: Number(temperature.value ?? 0.2),
     }));
+    if (apiKey.value.trim()) await props.adapter.storeApiKey(apiKey.value.trim());
+    else await props.adapter.deleteApiKey();
     message.success(t.value.msg.aiConfigSaved);
   } catch (error) {
     message.error(`${t.value.msg.aiConfigSaveFailed}: ${String(error)}`);
@@ -674,39 +746,51 @@ function saveLocalAiConfig() {
 
 function stopAnalysis() {
   if (!busy.value) return;
+  const reportId = report.value?.reportId;
   analysisRunId.value += 1;
   busy.value = false;
   statusKey.value = "canceled";
   aiOutput.value = "## 分析已中止\n\n当前请求若稍后返回，其结果会被忽略。";
+  if (reportId) void props.adapter.cancelAnalysis(reportId).catch(() => undefined);
 }
 
 async function sendFollowUp() {
   const question = followUpInput.value.trim();
   if (!question || !report.value || !aiOutput.value) return;
+  const reportId = report.value.reportId;
+  const runId = followUpRunId.value + 1;
+  followUpRunId.value = runId;
   followUpInput.value = "";
   followUps.value.push({ role: "user", content: question });
   followUpBusy.value = true;
   try {
-    const answer = await askFollowUp(
-      report.value,
+    const answer = await props.adapter.askFollowUp(
+      reportId,
       currentConfig(),
       traces.value,
       aiOutput.value,
       followUps.value.slice(0, -1),
       question,
-      props.adapter,
     );
+    if (followUpRunId.value !== runId || report.value?.reportId !== reportId) return;
     followUps.value.push({ role: "assistant", content: answer });
   } catch (error) {
+    if (followUpRunId.value !== runId || report.value?.reportId !== reportId) return;
     followUps.value.push({ role: "assistant", content: `追问失败：${String(error)}` });
   } finally {
-    followUpBusy.value = false;
+    if (followUpRunId.value === runId && report.value?.reportId === reportId) {
+      followUpBusy.value = false;
+    }
   }
 }
 
 function clearAll() {
+  loadRunId.value += 1;
+  fetchingReport.value = false;
   if (busy.value) stopAnalysis();
-  report.value = null;
+  followUpRunId.value += 1;
+  followUpBusy.value = false;
+  void releaseCurrentReport();
   sourceInput.value = "";
   textInput.value = "";
   traces.value = [];
@@ -825,19 +909,28 @@ function onDrop(event: DragEvent) {
   }
 }
 
-function base64ToBytes(value: string) {
-  const binary = window.atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
 function severityType(severity: string) {
   if (severity === "critical") return "error";
   if (severity === "warning") return "warning";
   return "info";
+}
+
+function formatNumber(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return new Intl.NumberFormat(language.value === "zh" ? "zh-CN" : "en-US", { maximumFractionDigits: 2 }).format(number);
+}
+
+function formatBytes(value: unknown) {
+  let bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "-";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let unit = 0;
+  while (bytes >= 1024 && unit < units.length - 1) {
+    bytes /= 1024;
+    unit += 1;
+  }
+  return `${bytes.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
 }
 
 function traceType(trace: AgentTrace) {

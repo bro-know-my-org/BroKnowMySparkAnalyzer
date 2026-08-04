@@ -1,7 +1,7 @@
 {
   "name": "@bro-know-my/spark-analyzer",
   "version": "0.1.0",
-  "description": "Reusable Vue Spark report analyzer view for BroKnowMy apps.",
+  "description": "Pure Vue UI for the bkmsa Rust analyzer.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -49,8 +49,7 @@
   "dependencies": {
     "dompurify": "^3.4.11",
     "html-to-image": "^1.11.13",
-    "marked": "^16.4.1",
-    "protobufjs": "^7.5.4"
+    "marked": "^16.4.1"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.4",
