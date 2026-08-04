@@ -1,0 +1,24 @@
+[package]
+name = "bkmsa-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Evidence-driven AI agent for bkmsa"
+
+[features]
+default = []
+native-client = ["dep:reqwest"]
+
+[dependencies]
+async-trait = "0.1"
+bkmsa-core = { path = "../bkmsa-core" }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

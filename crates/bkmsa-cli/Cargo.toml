@@ -1,0 +1,36 @@
+[package]
+name = "bkmsa-cli"
+version.workspace = true
+edition.workspace = true
+description = "Command-line interface for BroKnowMySparkAnalyzer"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "bkmsa_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bkmsa"
+path = "src/main.rs"
+
+[dependencies]
+bkmsa-agent = { path = "../bkmsa-agent", features = ["native-client"] }
+bkmsa-core = { path = "../bkmsa-core" }
+clap = { version = "4.5", features = ["derive", "env"] }
+dirs = "6"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "io-std"] }
+toml = "0.8"
+url.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+prost = "0.13"
+tempfile = "3"

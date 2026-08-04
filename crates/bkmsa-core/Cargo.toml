@@ -1,0 +1,19 @@
+[package]
+name = "bkmsa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+prost = "0.13"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"

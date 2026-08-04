@@ -1,6 +1,8 @@
 node_modules/
 .pnpm-store/
 dist/
+/target/
+public/bkmsa-wasm/
 src-tauri/target/
 src-tauri/gen/
 
