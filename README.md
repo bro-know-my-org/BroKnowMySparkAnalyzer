@@ -1,115 +1,153 @@
-# BroKnowMySparkAnalyzer
+# BroKnowMySparkAnalyzer (`bkmsa`)
 
 [中文](#中文) | [English](#english)
 
 ## 中文
 
-BroKnowMySparkAnalyzer 是一个用于本地检查 Minecraft spark 性能报告的 Tauri 桌面应用。AI 部分以小型报告分析 agent 的形式运行：它会查看可用的本地报告工具，按需请求证据，然后基于已收集的数据输出 Markdown 诊断。
+BroKnowMySparkAnalyzer 是 Minecraft [spark](https://spark.lucko.me/) 报告分析器。Rust 是唯一的解析、诊断和 AI agent 实现；Vue/TypeScript 只负责界面，Tauri 只负责桌面系统适配。
 
-### 当前范围
+同一套 Rust 核心同时服务于：
 
-- 导入本地 spark protobuf 文件：
-  - CPU profiler fallback 保存的 `.sparkprofile`。
-  - heap summary fallback 保存的 `.sparkheap`。
-  - 如果单独保存，也可以导入原始 health protobuf 文件。
-- 粘贴 `spark.lucko.me` viewer URL、`spark-usercontent.lucko.me` URL 或原始 bytebin key。
-- 粘贴纯文本日志或手动复制的报告笔记。
-- 使用从 `lucko/spark` 复制的 schema 解码 protobuf。
-- 生成 TPS、MSPT、CPU、heap、entities、GC、CPU hotspots 和 heap object hotspots 的本地发现。
-- 使用 AI 工具循环分析报告，而不是把所有数据塞进单个手写 prompt。
-- 将最终诊断渲染为 Markdown，并显示 agent 工具调用轨迹。
-- 默认中文和深色模式，顶部栏提供语言切换和明暗主题切换。
-- 原始 agent/tool payload 放在 Debug 开关后面；普通模式只展示简洁的工具调用摘要。
-- 诊断面板支持全屏查看、Markdown 导出和 PNG 图片导出。
-- 主面板和指标卡片可以通过浏览器 resize handle 手动纵向调整高度。
-- 设置面板支持测试 AI provider 连通性。
-- 支持从 OpenAI-compatible `/models` 获取模型列表；不暴露模型列表的 provider 仍可手动编辑模型名。
-- 温度等不常用 AI 参数收在 Advanced AI Settings 折叠区域下，默认 temperature 为 `0.2`。
-- 远程报告抓取时，抓取按钮会显示 loading 状态。
-- 生成诊断后，追问面板可以基于当前报告、最终诊断和已收集工具证据继续向 AI 提问。
-- 通过可配置的 `API Key`、`Base URL`、`Model` 和 `Temperature` 调用 OpenAI-compatible `/chat/completions` provider。
-- UI 技术栈：Vue 3 + Naive UI。
-- 包管理器：pnpm。
+- `bkmsa` 原生 CLI；
+- Tauri 桌面应用；
+- `bkmsa-wasm` WebAssembly 浏览器后端。
 
-### Agent 工具
-
-分析报告时，agent 可以请求这些本地工具：
-
-- `report_inventory`：报告类型、来源、可用数据族和工具名。
-- `overview`：TPS/MSPT/CPU/heap/entities/GC，以及本地阈值发现。
-- `hotspots`：过滤后的 CPU profile hotspots。
-- `hotspot_groups`：按类别、包名和线程分组 CPU frames，减少框架层 frame 噪声。
-- `hot_paths`：自动子帧下钻。使用 `category:auto` 时，会选择 `entity_tick`、`chunk_task`、`commands`、`block_entity` 或 `io` 等高占比可行动类别，再展开聚合 frame 下面的具体类/函数。
-  它同时返回扁平 `frames` 和深层 `callChains`；结论应优先使用 `callChains`，因为包装层 frame 通常不是根因。
-- `mod_sources`：使用 spark `class_sources`、`method_sources`、`line_sources` 和 `metadata.sources` 做 mod/source 归因。
-  它会报告 `resolvedSourceCount` 和 verdict，帮助 agent 区分 “unknown 占主导” 和 “全部都是 unknown”。
-- `time_windows`：spark 时间窗口统计。
-- `worst_windows`：按最大 MSPT、median MSPT 和低 TPS 排序的最差窗口，并带前后窗口 delta。
-- `entities`：world/entity 摘要和原始 world statistics 子集。
-- `entity_chunks`：实体密度最高的 chunk、实体混合和本地风险信号。
-- `heap`：heap summary 对象排行。
-- `memory_gc`：heap、memory-pool 和 GC 聚合统计，包括 pause/frequency 异常信号。
-- `diagnostic_hypotheses`：本地证据综合，交叉检查 hotspots、mod sources、entity chunks 和 worst windows。
-- `evidence_gaps`：当前报告能证明什么、不能证明什么，以及下一步需要采集什么。
-- `raw_field`：有边界地读取原始 protobuf 字段路径。
-
-核心设计选择是：AI 不能只靠单个摘要编造精确结论。它必须先调用工具。当前报告无法唯一证明具体实例、chunk 或 mod 时，agent 必须明确说明证据不足，并给出下一步采集方式，通常是 `/spark profiler --only-ticks-over 50 --timeout 120`。
-
-### 运行
-
-```powershell
-pnpm install
-pnpm run dev
-```
-
-仅做前端迭代：
-
-```powershell
-pnpm run dev:web
-```
-
-本地 Vite 地址：
+### 架构
 
 ```text
-http://127.0.0.1:1420
+crates/bkmsa-core    protobuf 解码、摘要、确定性报告工具和诊断规则
+crates/bkmsa-agent   基于证据工具的 OpenAI-compatible agent
+crates/bkmsa-cli     原生 bkmsa 命令行程序
+crates/bkmsa-wasm    core/agent 的浏览器 WASM 适配层
+src-tauri            报告会话、网络、凭据和文件操作的 thin shell
+packages/spark-analyzer
+                     纯 Vue UI，通过 SparkAnalyzerAdapter 调用宿主
 ```
 
-纯 Web 版本与桌面版共用同一套分析界面和报告逻辑。浏览器中可直接上传并本地解析 spark 报告、运行可视化分析、导出 Markdown/PNG，并在 AI provider 支持 CORS 时直接调用 AI。构建静态站点：
+报告在 Rust/Tauri 或 WASM 内以 `reportId` 保存。UI 只接收摘要和工具结果，不解析 protobuf，也不包含诊断规则或 AI transport。
 
-```powershell
-pnpm run build:web
+支持本地 `.sparkprofile`、`.sparkheap`、原始 health protobuf、文本日志、标准输入，以及 spark viewer/content URL 或报告 key。通过标准输入传文本时必须显式加 `--text`，避免损坏的 protobuf 被静默当成日志接受。
+
+### CLI
+
+开发时可通过 Cargo 或 pnpm 运行：
+
+```bash
+cargo run -p bkmsa-cli -- inspect report.sparkprofile
+pnpm bkmsa -- inspect report.sparkprofile
 ```
 
-产物位于 `dist`，可以部署到 GitHub Pages、Cloudflare Pages、Vercel 或任意静态文件服务。远程 spark 链接若被浏览器 CORS 拦截，可改用本地上传，或在构建时配置 `VITE_SPARK_PROXY_URL` 指向受信任的白名单代理。
+构建原生二进制：
 
-### 构建
+```bash
+cargo build --release -p bkmsa-cli
+./target/release/bkmsa --help
+```
 
-```powershell
+常用命令：
+
+```bash
+bkmsa tools --format terminal
+bkmsa inventory report.sparkprofile --format json
+bkmsa inspect report.sparkprofile
+bkmsa inspect - --format json
+bkmsa inspect - --text --format json # 从 stdin 读取文本日志
+bkmsa tool report.sparkprofile overview
+bkmsa tool report.sparkprofile hot-paths --category auto --limit 16
+bkmsa tool report.sparkprofile raw-field --path metadata.platformStatistics
+bkmsa analyze report.sparkprofile --format markdown --output diagnosis.md
+bkmsa analyze https://spark.lucko.me/<key>
+```
+
+工具名可使用 `hot_paths` 或 `hot-paths`。复杂参数使用 `--args '{"limit":12}'`，简单参数也可重复传入 `--arg KEY=VALUE`。所有命令支持 `--format terminal|json|markdown` 和 `--output <path>`。
+
+AI 分析配置：
+
+```bash
+export BKMSA_API_KEY="..."
+export BKMSA_BASE_URL="https://api.openai.com/v1"
+export BKMSA_MODEL="gpt-4.1-mini"
+export BKMSA_TEMPERATURE="0.2"
+
+bkmsa analyze report.sparkprofile --max-rounds 12
+```
+
+也可写入平台配置目录下的 `bkmsa/config.toml`，或通过 `--config` / `BKMSA_CONFIG` 指定文件：
+
+```toml
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+temperature = 0.2
+```
+
+配置优先级为命令行/环境变量、配置文件、内置默认值。API Key 可以写入配置文件，但更推荐使用 `BKMSA_API_KEY`，避免明文落盘。
+
+`--api-key` 可用但不推荐，因为可能进入 shell history。CLI 退出码：
+
+| 代码 | 含义 |
+| ---: | --- |
+| 0 | 成功 |
+| 2 | 参数或配置错误 |
+| 3 | 报告读取或下载失败 |
+| 4 | protobuf 解码失败 |
+| 5 | AI provider 失败 |
+| 6 | 分析或输出失败 |
+
+确定性工具包括 `overview`、`environment`、`hotspots`、`hotspot_groups`、`hot_paths`、`mod_sources`、`time_windows`、`worst_windows`、`entities`、`entity_chunks`、`heap`、`memory_gc`、`evidence_links`、`diagnostic_hypotheses`、`evidence_gaps` 和受限的 `raw_field`。以 `bkmsa tools` 输出为当前权威清单。
+
+### 开发与构建
+
+要求：稳定版 Rust、Node.js 22、pnpm 11；Web 构建还需要 `wasm-pack`，桌面构建还需要对应平台的 Tauri 2 系统依赖。
+
+```bash
+pnpm install
+cargo test --workspace --all-targets
+pnpm run build
+```
+
+桌面开发与打包：
+
+```bash
+pnpm run dev
 pnpm run tauri build
 ```
 
-本地 Tauri 构建产物使用 Tauri 默认命名，例如：
+Web/WASM 开发与构建：
 
-- `src-tauri\target\release\bro-know-my-spark-analyzer.exe`
-- `src-tauri\target\release\bundle\msi\BroKnowMySparkAnalyzer_0.1.0_x64_en-US.msi`
-- `src-tauri\target\release\bundle\nsis\BroKnowMySparkAnalyzer_0.1.0_x64-setup.exe`
+```bash
+pnpm run build:wasm
+pnpm run test:wasm
+pnpm run dev:web
 
-release `.exe` 可以作为 Windows portable build 使用，前提是目标机器安装了所需的 WebView2 runtime。MSI/NSIS 是可选安装包。Tauri 原则上跨平台，但桌面 bundle 应分别在 Windows、macOS 和 Linux 上为各自原生包格式构建。
-
-### 发布
-
-GitHub Actions 会从版本 tag 发布 release：
-
-```powershell
-git tag v0.1.1
-git push origin v0.1.1
+# 静态发布构建
+pnpm run build:wasm
+pnpm run build:web
 ```
 
-workflow 会解析 tag 版本，临时同步 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml`，在各桌面平台构建，然后把资产重命名为小写 kebab-case。
+`build:wasm` 使用 `wasm-pack --target web` 将模块生成到 `public/bkmsa-wasm/`；Vite 将它与 Web UI 一起发布到 `dist/`。也可用 `VITE_BKMSA_WASM_MODULE` 指向外部 WASM JS 模块。远程 spark URL 若受浏览器 CORS 限制，可上传本地报告，或通过 `VITE_SPARK_PROXY_URL` 配置可信白名单代理。Web 端 AI provider 同样必须允许浏览器 CORS。
 
-预期 release asset 名称：
+单独构建可复用 UI 包：
+
+```bash
+pnpm --dir packages/spark-analyzer build
+```
+
+### 测试策略
+
+仓库不能依赖真实服务器报告或私有 `.sparkprofile` fixture。核心测试因此使用合成 protobuf/`Report` 数据验证解析、分类、证据与诊断契约；CLI 集成测试验证命令、JSON envelope 和退出码；agent 测试使用 mock provider，不调用真实 AI 服务。
+
+私有真实报告只适合本地补充回归，不能提交到仓库。发现真实报告暴露的新结构时，应先最小化并匿名化为合成 fixture 或结构化契约测试，再修复 Rust 核心。旧的 `scripts/*.mjs` 只保留为 `bkmsa` CLI 兼容包装，不含第二套解析/分析逻辑。
+
+### 发布资产
+
+推送 `v*` tag（或手动触发 Release workflow）会为 Windows、Linux 和 macOS 构建桌面包及原生 CLI。版本 `0.1.1` 的预期资产示例：
 
 ```text
+bkmsa-0.1.1-windows-x64.exe
+bkmsa-0.1.1-linux-x64
+bkmsa-0.1.1-macos-x64
+bkmsa-0.1.1-macos-arm64
+
 bro-know-my-spark-analyzer-0.1.1-windows-x64-portable.exe
 bro-know-my-spark-analyzer-0.1.1-windows-x64-setup.exe
 bro-know-my-spark-analyzer-0.1.1-windows-x64.msi
@@ -120,175 +158,154 @@ bro-know-my-spark-analyzer-0.1.1-macos-x64.dmg
 bro-know-my-spark-analyzer-0.1.1-macos-arm64.dmg
 ```
 
-当前公开构建未签名。Windows 可能显示 SmartScreen 提示，macOS 首次启动可能需要在 Privacy & Security 中手动允许。
-
-### AI Provider Presets
-
-当前版本把 provider 视为 OpenAI-compatible chat-completions endpoint：
-
-- OpenAI：`https://api.openai.com/v1`
-- NewAPI Happy：`https://newapi.hello-happy.world/v1`
-- DeepSeek：`https://api.deepseek.com/v1`
-- Moonshot：`https://api.moonshot.cn/v1`
-- SiliconFlow：`https://api.siliconflow.cn/v1`
-- OpenRouter：`https://openrouter.ai/api/v1`
-- Custom：用户自定义 Base URL
-
-Claude official API 目前没有作为 preset 接入，因为它不是 OpenAI-compatible。需要时可以添加第二个 adapter。
-
-### Spark Source Review Notes
-
-spark 报告上传/保存路径定义在 `spark-common`：
-
-- CPU profile upload content type：`application/x-spark-sampler`
-- Heap summary upload content type：`application/x-spark-heap`
-- Health upload content type：`application/x-spark-health`
-- CPU profile fallback save：`config/spark/profile-<timestamp>.sparkprofile`
-- Heap summary fallback save：`config/spark/heapsummary-<timestamp>.sparkheap`
-
-复制的 protobuf schema 位于 `public/proto/`。嵌套的 `public/proto/spark/` 副本用于兼容 spark 内部 import path。
-
-### 本地 Fixture 测试
-
-使用检查脚本分析本地 `.sparkprofile` fixture：
-
-```powershell
-node scripts\inspect-sparkprofile.mjs path\to\sample.sparkprofile
-node scripts\agent-smoke.mjs path\to\sample.sparkprofile
-```
-
-`inspect-sparkprofile.mjs` 也会在每个输入报告旁边写入 `<report>.prompt.txt`，方便检查 prompt。`agent-smoke.mjs` 用于测试 AI agent 使用的 report-tool 层。
-
-游戏内下一步常用采集命令：
-
-```text
-/spark profiler --stop --save-to-file
-```
-
-也可以使用当前 spark 版本提供的保存 flag。输出路径通常在 `config/spark/` 下。
-
-### 已验证
-
-- `pnpm install`
-- `pnpm run build`
-- `cargo check` in `src-tauri`
-- `pnpm run tauri build`
-- 使用 `protobufjs` 解码本地 `.sparkprofile` fixtures。
-- 使用本地 fixtures 验证 `agent-smoke.mjs`。
-- TPS/MSPT 结论中，server-tick 类别只按 `Server thread` 归因。Netty、worker 或 async sync 等后台线程只作为后台压力说明，除非证据明确关联回 Server thread。
-- CPU hotspot 过滤会从默认可行动 hotspot 列表中移除 Minecraft/DedicatedServer 顶层循环、idle waits、Netty executor wrappers、FileWatcher、Lambda 和 Mixin bridge frames。原始 payload 仍可在 Debug 中查看。
-- `hotspot_groups` 保留 `other`，但会排在 `block_entity`、`entity_tick` 和 `chunk_task` 等可行动类别后面。
-- `memory_gc` 可以在 heap usage 未接近上限时识别 GC 异常。
-- 如果 `resolvedSourceCount` 或 notable source attribution 存在，部分 source maps 报告不能被当成全 unknown。
+macOS DMG 当前是可选产物；若 Tauri 未生成 DMG，release 仍可只包含该平台 CLI。当前公开桌面构建未签名。
 
 ## English
 
-BroKnowMySparkAnalyzer is a Tauri desktop app for inspecting Minecraft spark performance reports locally. The AI side runs as a small report-analysis agent: it sees the available local report tools, requests the evidence it needs, and then writes a Markdown diagnosis from the collected data.
+BroKnowMySparkAnalyzer analyzes Minecraft [spark](https://spark.lucko.me/) reports. Rust is the sole implementation of parsing, diagnostics, and the AI agent; Vue/TypeScript is UI only, while Tauri is a thin desktop adapter.
 
-### Current Scope
+The same Rust core powers:
 
-- Import local spark protobuf files:
-  - `.sparkprofile` from CPU profiler fallback saves.
-  - `.sparkheap` from heap summary fallback saves.
-  - raw health protobuf files if saved separately.
-- Paste a `spark.lucko.me` viewer URL, `spark-usercontent.lucko.me` URL, or raw bytebin key.
-- Paste plain text logs or manually copied report notes.
-- Decode protobuf with the schema copied from `lucko/spark`.
-- Generate local findings for TPS, MSPT, CPU, heap, entities, GC, CPU hotspots, and heap object hotspots.
-- Run an AI tool loop over the report instead of sending one large hand-built prompt.
-- Render the final diagnosis as Markdown and show the agent tool trace.
-- Default to Chinese and dark mode, with top-bar language and light/dark theme switches.
-- Keep raw agent/tool payloads behind a Debug switch. Normal mode shows concise tool-call summaries.
-- Support fullscreen diagnosis viewing, Markdown export, and PNG image export.
-- Allow main panels and metric cards to be resized vertically from the browser resize handle.
-- Test AI provider connectivity from the settings panel.
-- Fetch OpenAI-compatible model lists from `/models`; the model selector remains manually editable for providers that do not expose model listing.
-- Keep less-used AI knobs such as temperature under a collapsed Advanced AI Settings section. Default temperature is `0.2`.
-- Show a loading state while fetching remote reports.
-- After a diagnosis is generated, ask follow-up questions using the current report, final diagnosis, and collected tool evidence as context.
-- Call OpenAI-compatible `/chat/completions` providers with configurable `API Key`, `Base URL`, `Model`, and `Temperature`.
-- UI stack: Vue 3 + Naive UI.
-- Package manager: pnpm.
+- the native `bkmsa` CLI;
+- the Tauri desktop app;
+- the `bkmsa-wasm` browser backend.
 
-### Agent Tools
-
-The agent can request these local tools while analyzing a report:
-
-- `report_inventory`: report type, source, available data families and tool names.
-- `overview`: TPS/MSPT/CPU/heap/entities/GC plus local threshold findings.
-- `hotspots`: filtered CPU profile hotspots.
-- `hotspot_groups`: CPU frames grouped by category/package/thread to reduce framework-frame noise.
-- `hot_paths`: automatic child-frame drilldown. With `category:auto`, it selects high-percent actionable categories such as `entity_tick`, `chunk_task`, `commands`, `block_entity`, or `io`, then expands concrete classes/functions below aggregate frames.
-  It returns both flat `frames` and deep `callChains`; conclusions should prefer `callChains` because wrapper frames are usually not the root cause.
-- `mod_sources`: mod/source attribution using spark `class_sources`, `method_sources`, `line_sources`, and `metadata.sources`.
-  It reports `resolvedSourceCount` and a verdict so the agent can distinguish "unknown dominates" from "all sources are unknown".
-- `time_windows`: spark time-window statistics.
-- `worst_windows`: worst windows by max MSPT, median MSPT, and low TPS, with previous/next-window deltas.
-- `entities`: world/entity summaries and raw world statistics subset.
-- `entity_chunks`: top entity-density chunks with entity mixes and local risk signals.
-- `heap`: heap summary object ranking.
-- `memory_gc`: heap, memory-pool, and GC aggregate statistics, including pause/frequency anomaly signals.
-- `diagnostic_hypotheses`: local evidence synthesis that cross-checks hotspots, mod sources, entity chunks, and worst windows.
-- `evidence_gaps`: what the current report can prove, cannot prove, and what to capture next.
-- `raw_field`: bounded read of a raw protobuf field path.
-
-The important design choice is that the AI is not trusted to invent precision from a single summary. It must call the tools first. When the report cannot uniquely prove the exact instance, chunk, or mod, the agent is instructed to say so and name the follow-up capture, usually `/spark profiler --only-ticks-over 50 --timeout 120`.
-
-### Run
-
-```powershell
-pnpm install
-pnpm run dev
-```
-
-For frontend-only iteration:
-
-```powershell
-pnpm run dev:web
-```
-
-The local Vite URL is:
+### Architecture
 
 ```text
-http://127.0.0.1:1420
+crates/bkmsa-core    protobuf decoding, summaries, deterministic tools and rules
+crates/bkmsa-agent   evidence-driven OpenAI-compatible agent
+crates/bkmsa-cli     native bkmsa command-line program
+crates/bkmsa-wasm    browser WASM adapter for core/agent
+src-tauri            thin shell for sessions, network, credentials and files
+packages/spark-analyzer
+                     pure Vue UI using SparkAnalyzerAdapter
 ```
 
-The pure Web build shares the analyzer UI and report logic with the desktop app. It can parse local spark reports, render visual summaries, export Markdown/PNG, and call AI providers directly when they allow CORS:
+Reports remain behind a `reportId` inside Rust/Tauri or WASM. The UI receives summaries and tool results; it does not decode protobuf, implement diagnostic rules, or provide an AI transport.
 
-```powershell
-pnpm run build:web
+Supported inputs include local `.sparkprofile`, `.sparkheap`, raw health protobuf, text logs, stdin, spark viewer/content URLs, and report keys. Text read from stdin must be selected explicitly with `--text`; this prevents damaged protobuf reports from being silently accepted as logs.
+
+### CLI
+
+Run from the workspace during development:
+
+```bash
+cargo run -p bkmsa-cli -- inspect report.sparkprofile
+pnpm bkmsa -- inspect report.sparkprofile
 ```
 
-Deploy the generated `dist` directory to GitHub Pages, Cloudflare Pages, Vercel, or any static host. If browser CORS blocks remote spark URLs, use local upload or set `VITE_SPARK_PROXY_URL` at build time to a trusted allow-listed proxy.
+Build the native executable:
 
-### Build
+```bash
+cargo build --release -p bkmsa-cli
+./target/release/bkmsa --help
+```
 
-```powershell
+Common commands:
+
+```bash
+bkmsa tools --format terminal
+bkmsa inventory report.sparkprofile --format json
+bkmsa inspect report.sparkprofile
+bkmsa inspect - --format json
+bkmsa inspect - --text --format json # read a text log from stdin
+bkmsa tool report.sparkprofile overview
+bkmsa tool report.sparkprofile hot-paths --category auto --limit 16
+bkmsa tool report.sparkprofile raw-field --path metadata.platformStatistics
+bkmsa analyze report.sparkprofile --format markdown --output diagnosis.md
+bkmsa analyze https://spark.lucko.me/<key>
+```
+
+Tool names accept either `hot_paths` or `hot-paths`. Use `--args '{"limit":12}'` for a complete JSON object, or repeat `--arg KEY=VALUE` for individual arguments. Every command supports `--format terminal|json|markdown` and `--output <path>`.
+
+AI configuration:
+
+```bash
+export BKMSA_API_KEY="..."
+export BKMSA_BASE_URL="https://api.openai.com/v1"
+export BKMSA_MODEL="gpt-4.1-mini"
+export BKMSA_TEMPERATURE="0.2"
+
+bkmsa analyze report.sparkprofile --max-rounds 12
+```
+
+Configuration may also live in `bkmsa/config.toml` below the platform config directory, or in a file selected through `--config` / `BKMSA_CONFIG`:
+
+```toml
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1-mini"
+temperature = 0.2
+```
+
+Precedence is command line/environment, configuration file, then built-in defaults. A key may be stored in TOML, but `BKMSA_API_KEY` is recommended to avoid a plaintext secret on disk.
+
+`--api-key` is available but discouraged because it may be stored in shell history. CLI exit codes are:
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | Success |
+| 2 | Argument or configuration error |
+| 3 | Report read or download failure |
+| 4 | Protobuf decode failure |
+| 5 | AI provider failure |
+| 6 | Analysis or output failure |
+
+Deterministic tools include `overview`, `environment`, `hotspots`, `hotspot_groups`, `hot_paths`, `mod_sources`, `time_windows`, `worst_windows`, `entities`, `entity_chunks`, `heap`, `memory_gc`, `evidence_links`, `diagnostic_hypotheses`, `evidence_gaps`, and bounded `raw_field`. Treat `bkmsa tools` as the authoritative current list.
+
+### Development and builds
+
+Requirements: stable Rust, Node.js 22, and pnpm 11. Web builds additionally need `wasm-pack`; desktop builds need the Tauri 2 system dependencies for the target platform.
+
+```bash
+pnpm install
+cargo test --workspace --all-targets
+pnpm run build
+```
+
+Desktop development and packaging:
+
+```bash
+pnpm run dev
 pnpm run tauri build
 ```
 
-Local Tauri build outputs use Tauri's default names, for example:
+Web/WASM development and production builds:
 
-- `src-tauri\target\release\bro-know-my-spark-analyzer.exe`
-- `src-tauri\target\release\bundle\msi\BroKnowMySparkAnalyzer_0.1.0_x64_en-US.msi`
-- `src-tauri\target\release\bundle\nsis\BroKnowMySparkAnalyzer_0.1.0_x64-setup.exe`
+```bash
+pnpm run build:wasm
+pnpm run test:wasm
+pnpm run dev:web
 
-The release `.exe` can be used as a portable Windows build as long as the machine has the required WebView2 runtime. The MSI/NSIS packages are optional installers. Tauri is cross-platform in principle, but desktop bundles should be built separately on Windows, macOS, and Linux for their native package formats.
-
-### Release
-
-GitHub Actions publishes releases from version tags:
-
-```powershell
-git tag v0.1.1
-git push origin v0.1.1
+# static production build
+pnpm run build:wasm
+pnpm run build:web
 ```
 
-The workflow parses the tag version, temporarily syncs `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, builds each desktop platform, then renames assets to lowercase kebab-case.
+`build:wasm` runs `wasm-pack --target web` and writes the module to `public/bkmsa-wasm/`; Vite publishes it with the Web UI in `dist/`. `VITE_BKMSA_WASM_MODULE` may point to an external WASM JS module instead. If browser CORS blocks remote spark URLs, upload a local report or configure a trusted allow-listed proxy through `VITE_SPARK_PROXY_URL`. Web AI providers must also allow browser CORS.
 
-Expected release asset names:
+Build the reusable UI package separately with:
+
+```bash
+pnpm --dir packages/spark-analyzer build
+```
+
+### Test strategy
+
+The repository must not depend on real server reports or private `.sparkprofile` fixtures. Core tests therefore use synthetic protobuf/`Report` data to verify parsing, classification, evidence, and diagnostic contracts. CLI integration tests verify commands, JSON envelopes, and exit codes. Agent tests use mock providers and never call a real AI service.
+
+Private real-world reports are optional local regression inputs and must not be committed. When one exposes a new structure, minimize and anonymize it into a synthetic fixture or structured contract test before changing the Rust core. Legacy `scripts/*.mjs` files are compatibility wrappers around `bkmsa`; they contain no second parser or analyzer implementation.
+
+### Release assets
+
+Pushing a `v*` tag (or manually dispatching the Release workflow) builds desktop packages and native CLIs for Windows, Linux, and macOS. Expected assets for version `0.1.1` include:
 
 ```text
+bkmsa-0.1.1-windows-x64.exe
+bkmsa-0.1.1-linux-x64
+bkmsa-0.1.1-macos-x64
+bkmsa-0.1.1-macos-arm64
+
 bro-know-my-spark-analyzer-0.1.1-windows-x64-portable.exe
 bro-know-my-spark-analyzer-0.1.1-windows-x64-setup.exe
 bro-know-my-spark-analyzer-0.1.1-windows-x64.msi
@@ -299,63 +316,4 @@ bro-know-my-spark-analyzer-0.1.1-macos-x64.dmg
 bro-know-my-spark-analyzer-0.1.1-macos-arm64.dmg
 ```
 
-Current public builds are unsigned. Windows may show SmartScreen warnings, and macOS may require manual approval in Privacy & Security on first launch.
-
-### AI Provider Presets
-
-The current version treats providers as OpenAI-compatible chat-completions endpoints:
-
-- OpenAI: `https://api.openai.com/v1`
-- NewAPI Happy: `https://newapi.hello-happy.world/v1`
-- DeepSeek: `https://api.deepseek.com/v1`
-- Moonshot: `https://api.moonshot.cn/v1`
-- SiliconFlow: `https://api.siliconflow.cn/v1`
-- OpenRouter: `https://openrouter.ai/api/v1`
-- Custom: user-supplied Base URL
-
-Claude official API is intentionally not wired as a preset yet because it is not OpenAI-compatible. Add a second adapter when needed.
-
-### Spark Source Review Notes
-
-Spark report upload/save paths are defined in `spark-common`:
-
-- CPU profile upload content type: `application/x-spark-sampler`
-- Heap summary upload content type: `application/x-spark-heap`
-- Health upload content type: `application/x-spark-health`
-- CPU profile fallback save: `config/spark/profile-<timestamp>.sparkprofile`
-- Heap summary fallback save: `config/spark/heapsummary-<timestamp>.sparkheap`
-
-The copied protobuf schema lives in `public/proto/`. The nested `public/proto/spark/` copy is kept for compatibility with spark's internal import paths.
-
-### Local Fixture Testing
-
-Use the inspection helpers with local `.sparkprofile` fixtures:
-
-```powershell
-node scripts\inspect-sparkprofile.mjs path\to\sample.sparkprofile
-node scripts\agent-smoke.mjs path\to\sample.sparkprofile
-```
-
-`inspect-sparkprofile.mjs` also writes `<report>.prompt.txt` next to each input report for prompt inspection. `agent-smoke.mjs` exercises the report-tool layer used by the AI agent.
-
-Next useful in-game capture command:
-
-```text
-/spark profiler --stop --save-to-file
-```
-
-Or use whichever spark command variant exposes the save flag in the installed version. The output path should be under `config/spark/`.
-
-### Verification Done
-
-- `pnpm install`
-- `pnpm run build`
-- `cargo check` in `src-tauri`
-- `pnpm run tauri build`
-- Decoded local `.sparkprofile` fixtures with `protobufjs`.
-- Verified `agent-smoke.mjs` against local fixtures.
-- For TPS/MSPT conclusions, server-tick categories are scoped to `Server thread`. Background threads such as Netty, worker, or async sync threads are reported as background pressure unless explicitly tied back to Server thread evidence.
-- CPU hotspot filtering removes Minecraft/DedicatedServer top-level loops, idle waits, Netty executor wrappers, FileWatcher, Lambda, and Mixin bridge frames from the default actionable hotspot list. Raw payloads remain available under Debug.
-- `hotspot_groups` keeps `other` available but sorts it behind actionable categories such as `block_entity`, `entity_tick`, and `chunk_task`.
-- `memory_gc` detects GC abnormalities even when heap usage is not near max.
-- Reports with partial source maps must not be treated as all-unknown when `resolvedSourceCount` or notable source attribution is present.
+macOS DMGs are currently optional; a release may contain only the CLI for that macOS target when Tauri does not produce a DMG. Public desktop builds are currently unsigned.
