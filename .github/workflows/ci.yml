@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ["v*"]
   pull_request:
 
 concurrency:
@@ -83,6 +84,9 @@ jobs:
           cargo package --locked -p bkmsa-agent \
             --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"'
           cargo package --locked -p bkmsa-tauri \
+            --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
+            --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
+          cargo package --locked -p bkmsa-cli \
             --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
             --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
 

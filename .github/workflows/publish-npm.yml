@@ -78,6 +78,9 @@ jobs:
           cargo package --locked -p bkmsa-tauri \
             --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
             --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
+          cargo package --locked -p bkmsa-cli \
+            --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
+            --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
 
       - name: Publish crates in dependency order
         env:
@@ -110,6 +113,7 @@ jobs:
           publish_with_retry bkmsa-core
           publish_with_retry bkmsa-agent
           publish_with_retry bkmsa-tauri
+          publish_with_retry bkmsa-cli
 
   publish-npm:
     name: Publish @bro-know-my/spark-analyzer

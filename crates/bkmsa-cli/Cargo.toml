@@ -5,7 +5,9 @@ edition.workspace = true
 description = "Command-line interface for BroKnowMySparkAnalyzer"
 license.workspace = true
 repository.workspace = true
-publish = false
+readme = "README.md"
+keywords = ["spark", "minecraft", "profiling", "cli"]
+categories = ["command-line-utilities", "development-tools::profiling"]
 
 [lib]
 name = "bkmsa_cli"
