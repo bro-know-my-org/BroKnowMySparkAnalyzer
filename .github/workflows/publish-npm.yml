@@ -15,11 +15,17 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
 jobs:
   publish-crates:
     name: Publish Rust crates
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -28,9 +34,11 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ inputs.version }}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${DISPATCH_VERSION}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
@@ -65,9 +73,9 @@ jobs:
       - name: Check package contents
         run: |
           cargo publish --dry-run --locked -p bkmsa-core
-          cargo package --locked --no-verify -p bkmsa-agent \
+          cargo package --locked -p bkmsa-agent \
             --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"'
-          cargo package --locked --no-verify -p bkmsa-tauri \
+          cargo package --locked -p bkmsa-tauri \
             --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
             --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
 
@@ -85,6 +93,10 @@ jobs:
             fi
             for attempt in 1 2 3 4 5; do
               if cargo publish --locked -p "${crate}"; then
+                return 0
+              fi
+              if cargo info "${crate}@${RELEASE_VERSION}" --registry crates-io >/dev/null 2>&1; then
+                echo "${crate} ${RELEASE_VERSION} became available after the publish attempt"
                 return 0
               fi
               if [[ "${attempt}" == "5" ]]; then
@@ -112,9 +124,11 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ inputs.version }}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${DISPATCH_VERSION}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
@@ -167,6 +181,8 @@ jobs:
         run: |
           if npm view "@bro-know-my/spark-analyzer@${RELEASE_VERSION}" version >/dev/null 2>&1; then
             echo "npm package ${RELEASE_VERSION} is already published; skipping"
+          elif [[ "${RELEASE_VERSION}" == *-* ]]; then
+            npm publish --access public --provenance --tag next
           else
-            npm publish --access public --provenance
+            npm publish --access public --provenance --tag latest
           fi
