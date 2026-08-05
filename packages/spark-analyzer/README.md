@@ -53,6 +53,23 @@ const adapter: SparkAnalyzerAdapter = {
 
 UI 不直接调用 Tauri 或 WASM API。仓库内的 standalone host 在桌面端把 adapter 映射到 `analyzer_*` Tauri commands，在浏览器端延迟加载 `bkmsa-wasm`。
 
+Tauri 2 宿主推荐直接使用配套的 `bkmsa-tauri` crate 和包内 adapter：
+
+```rust
+tauri::Builder::default()
+    .plugin(bkmsa_tauri::init())
+```
+
+在 capability 中加入 `"bkmsa-tauri:default"`，然后：
+
+```ts
+import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
+
+const adapter = createTauriSparkAnalyzerAdapter();
+```
+
+宿主仍需安装并注册 `@tauri-apps/plugin-dialog` 和 `@tauri-apps/plugin-opener`，用于导出路径选择和打开外部链接。
+
 宿主可以显式控制 debug：
 
 ```vue
@@ -119,6 +136,23 @@ const adapter: SparkAnalyzerAdapter = {
 ```
 
 The UI does not call Tauri or WASM APIs directly. The repository's standalone host maps the adapter to `analyzer_*` Tauri commands on desktop and lazily loads `bkmsa-wasm` in browsers.
+
+Tauri 2 hosts should use the matching `bkmsa-tauri` crate and the packaged adapter:
+
+```rust
+tauri::Builder::default()
+    .plugin(bkmsa_tauri::init())
+```
+
+Add `"bkmsa-tauri:default"` to the capability, then:
+
+```ts
+import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
+
+const adapter = createTauriSparkAnalyzerAdapter();
+```
+
+The host must also install and register `@tauri-apps/plugin-dialog` and `@tauri-apps/plugin-opener` for export path selection and external URLs.
 
 The host may control debug mode explicitly:
 

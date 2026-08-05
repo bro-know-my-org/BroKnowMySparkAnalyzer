@@ -17,14 +17,17 @@ BroKnowMySparkAnalyzer 是 Minecraft [spark](https://spark.lucko.me/) 报告分�
 ```text
 crates/bkmsa-core    protobuf 解码、摘要、确定性报告工具和诊断规则
 crates/bkmsa-agent   基于证据工具的 OpenAI-compatible agent
+crates/bkmsa-tauri   可复用的 Tauri 2 原生分析插件
 crates/bkmsa-cli     原生 bkmsa 命令行程序
 crates/bkmsa-wasm    core/agent 的浏览器 WASM 适配层
-src-tauri            报告会话、网络、凭据和文件操作的 thin shell
+src-tauri            注册 bkmsa-tauri 的独立桌面应用壳
 packages/spark-analyzer
-                     纯 Vue UI，通过 SparkAnalyzerAdapter 调用宿主
+                     Vue UI，以及可选的 Tauri adapter
 ```
 
 报告在 Rust/Tauri 或 WASM 内以 `reportId` 保存。UI 只接收摘要和工具结果，不解析 protobuf，也不包含诊断规则或 AI transport。
+
+独立 Analyzer 与 BroKnowMyToolbox 都注册同一个 `bkmsa-tauri` 插件，并使用 npm 包的 `createTauriSparkAnalyzerAdapter()`。因此两个应用共享完全相同的解析、工具、Agent、请求限制和取消语义；应用自身只负责窗口和工具布局。
 
 支持本地 `.sparkprofile`、`.sparkheap`、原始 health protobuf、文本日志、标准输入，以及 spark viewer/content URL 或报告 key。通过标准输入传文本时必须显式加 `--text`，避免损坏的 protobuf 被静默当成日志接受。
 
@@ -132,6 +135,27 @@ pnpm run build:web
 pnpm --dir packages/spark-analyzer build
 ```
 
+在另一个 Tauri 2 应用中嵌入分析器：
+
+```toml
+[dependencies]
+bkmsa-tauri = "0.1.0"
+```
+
+```rust
+tauri::Builder::default()
+    .plugin(bkmsa_tauri::init())
+```
+
+应用 capability 需要加入 `"bkmsa-tauri:default"`。前端安装 UI 和宿主插件后创建 adapter：
+
+```ts
+import { SparkAnalyzerView } from "@bro-know-my/spark-analyzer";
+import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
+
+const adapter = createTauriSparkAnalyzerAdapter();
+```
+
 ### 测试策略
 
 仓库不能依赖真实服务器报告或私有 `.sparkprofile` fixture。核心测试因此使用合成 protobuf/`Report` 数据验证解析、分类、证据与诊断契约；CLI 集成测试验证命令、JSON envelope 和退出码；agent 测试使用 mock provider，不调用真实 AI 服务。
@@ -139,6 +163,15 @@ pnpm --dir packages/spark-analyzer build
 私有真实报告只适合本地补充回归，不能提交到仓库。发现真实报告暴露的新结构时，应先最小化并匿名化为合成 fixture 或结构化契约测试，再修复 Rust 核心。旧的 `scripts/*.mjs` 只保留为 `bkmsa` CLI 兼容包装，不含第二套解析/分析逻辑。
 
 ### 发布资产
+
+推送 tag 前必须先把 workspace 版本更新为目标版本。`Publish SDK Packages` workflow 会按依赖顺序发布 `bkmsa-core`、`bkmsa-agent`、`bkmsa-tauri`，然后发布同版本的 `@bro-know-my/spark-analyzer`。仓库 Actions secrets 需要：
+
+```text
+CARGO_REGISTRY_TOKEN  crates.io 发布 token
+NPM_TOKEN             npm 发布 token
+```
+
+首次 `cargo publish` 会自动创建 crate，不需要在 crates.io 手动建包。首次发布后可以把 token 收紧到这三个 crate，或迁移到 crates.io Trusted Publishing。crate 版本不可覆盖；workflow 支持安全重跑并跳过已经存在的同版本包。
 
 推送 `v*` tag（或手动触发 Release workflow）会为 Windows、Linux 和 macOS 构建桌面包及原生 CLI。版本 `0.1.1` 的预期资产示例：
 
@@ -175,14 +208,17 @@ The same Rust core powers:
 ```text
 crates/bkmsa-core    protobuf decoding, summaries, deterministic tools and rules
 crates/bkmsa-agent   evidence-driven OpenAI-compatible agent
+crates/bkmsa-tauri   reusable native Tauri 2 analyzer plugin
 crates/bkmsa-cli     native bkmsa command-line program
 crates/bkmsa-wasm    browser WASM adapter for core/agent
-src-tauri            thin shell for sessions, network, credentials and files
+src-tauri            standalone desktop host that registers bkmsa-tauri
 packages/spark-analyzer
-                     pure Vue UI using SparkAnalyzerAdapter
+                     Vue UI plus an optional Tauri adapter
 ```
 
 Reports remain behind a `reportId` inside Rust/Tauri or WASM. The UI receives summaries and tool results; it does not decode protobuf, implement diagnostic rules, or provide an AI transport.
+
+The standalone Analyzer and BroKnowMyToolbox both register the same `bkmsa-tauri` plugin and use `createTauriSparkAnalyzerAdapter()` from the npm package. Both applications therefore share identical parsing, tools, agent behavior, request limits, and cancellation semantics; each app only owns its window and surrounding layout.
 
 Supported inputs include local `.sparkprofile`, `.sparkheap`, raw health protobuf, text logs, stdin, spark viewer/content URLs, and report keys. Text read from stdin must be selected explicitly with `--text`; this prevents damaged protobuf reports from being silently accepted as logs.
 
@@ -290,6 +326,27 @@ Build the reusable UI package separately with:
 pnpm --dir packages/spark-analyzer build
 ```
 
+To embed the analyzer in another Tauri 2 application:
+
+```toml
+[dependencies]
+bkmsa-tauri = "0.1.0"
+```
+
+```rust
+tauri::Builder::default()
+    .plugin(bkmsa_tauri::init())
+```
+
+Add `"bkmsa-tauri:default"` to the application capability. Install the UI and host plugins, then create the frontend adapter:
+
+```ts
+import { SparkAnalyzerView } from "@bro-know-my/spark-analyzer";
+import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
+
+const adapter = createTauriSparkAnalyzerAdapter();
+```
+
 ### Test strategy
 
 The repository must not depend on real server reports or private `.sparkprofile` fixtures. Core tests therefore use synthetic protobuf/`Report` data to verify parsing, classification, evidence, and diagnostic contracts. CLI integration tests verify commands, JSON envelopes, and exit codes. Agent tests use mock providers and never call a real AI service.
@@ -297,6 +354,15 @@ The repository must not depend on real server reports or private `.sparkprofile`
 Private real-world reports are optional local regression inputs and must not be committed. When one exposes a new structure, minimize and anonymize it into a synthetic fixture or structured contract test before changing the Rust core. Legacy `scripts/*.mjs` files are compatibility wrappers around `bkmsa`; they contain no second parser or analyzer implementation.
 
 ### Release assets
+
+Before pushing a tag, update the workspace version to the intended release. The `Publish SDK Packages` workflow publishes `bkmsa-core`, `bkmsa-agent`, and `bkmsa-tauri` in dependency order, followed by the matching `@bro-know-my/spark-analyzer` npm version. Configure these Actions secrets:
+
+```text
+CARGO_REGISTRY_TOKEN  crates.io publishing token
+NPM_TOKEN             npm publishing token
+```
+
+The first `cargo publish` creates each crate automatically; no manual crates.io package creation is needed. After bootstrapping, restrict the token to these crates or migrate to crates.io Trusted Publishing. Published versions cannot be overwritten. The workflow is rerunnable and skips matching versions that already exist.
 
 Pushing a `v*` tag (or manually dispatching the Release workflow) builds desktop packages and native CLIs for Windows, Linux, and macOS. Expected assets for version `0.1.1` include:
 

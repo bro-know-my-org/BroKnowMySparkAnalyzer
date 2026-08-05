@@ -73,7 +73,18 @@ jobs:
           pnpm run test:wasm
 
       - name: Build UI package
-        run: pnpm --dir packages/spark-analyzer build
+        run: |
+          pnpm --dir packages/spark-analyzer build
+          pnpm --dir packages/spark-analyzer run pack:dry
+
+      - name: Check publishable core package
+        run: |
+          cargo publish --dry-run --locked -p bkmsa-core
+          cargo package --locked --no-verify -p bkmsa-agent \
+            --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"'
+          cargo package --locked --no-verify -p bkmsa-tauri \
+            --config 'patch.crates-io.bkmsa-core.path="crates/bkmsa-core"' \
+            --config 'patch.crates-io.bkmsa-agent.path="crates/bkmsa-agent"'
 
       - name: Build desktop frontend
         run: pnpm run build
