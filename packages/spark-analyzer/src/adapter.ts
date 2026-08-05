@@ -91,11 +91,11 @@ export interface SparkAnalyzerAdapter {
   ): Promise<string>;
   testAiConnection(config: AiConfig): Promise<string>;
   listAiModels(config: AiConfig): Promise<AiModelInfo[]>;
-  loadApiKey(): Promise<string | null>;
-  storeApiKey(apiKey: string): Promise<void>;
+  loadApiKey(baseUrl?: string): Promise<string | null>;
+  storeApiKey(apiKey: string, baseUrl: string): Promise<void>;
   deleteApiKey(): Promise<void>;
   releaseReport(reportId: string): Promise<void>;
   pickSavePath(options: SavePathOptions): Promise<string | null>;
-  saveExportFile(path: string, bytesBase64: string): Promise<void>;
+  saveExportFile(path: string, bytesBase64: string): Promise<string | null>;
   openUrl(url: string): Promise<void>;
 }

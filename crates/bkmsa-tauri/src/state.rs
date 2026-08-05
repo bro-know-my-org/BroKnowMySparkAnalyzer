@@ -14,6 +14,7 @@ use std::{
 pub struct AnalyzerState {
     next_report_id: AtomicU64,
     next_analysis_id: AtomicU64,
+    report_loads: Arc<tokio::sync::Semaphore>,
     inner: Mutex<AnalyzerStateInner>,
 }
 
@@ -25,12 +26,14 @@ struct AnalyzerStateInner {
 }
 
 const MAX_REPORT_SESSIONS: usize = 8;
+const MAX_CONCURRENT_REPORT_LOADS: usize = 2;
 
 impl Default for AnalyzerState {
     fn default() -> Self {
         Self {
             next_report_id: AtomicU64::new(1),
             next_analysis_id: AtomicU64::new(1),
+            report_loads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPORT_LOADS)),
             inner: Mutex::new(AnalyzerStateInner::default()),
         }
     }
@@ -58,6 +61,15 @@ pub struct LoadedReport {
 }
 
 impl AnalyzerState {
+    pub fn try_acquire_report_load_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.report_loads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "同时加载的报告过多，请等待当前任务完成".to_string())
+    }
+
     pub fn insert(&self, report: Report) -> Result<LoadedReport, String> {
         let report_id = format!(
             "report-{}",
@@ -194,6 +206,17 @@ mod tests {
         );
         assert!(state.remove(&loaded.report_id).expect("remove report"));
         assert!(state.get(&loaded.report_id).is_err());
+    }
+
+    #[test]
+    fn bounds_concurrent_report_loads() {
+        let state = AnalyzerState::default();
+        let first = state.try_acquire_report_load_permit().unwrap();
+        let second = state.try_acquire_report_load_permit().unwrap();
+        assert!(state.try_acquire_report_load_permit().is_err());
+        drop(first);
+        assert!(state.try_acquire_report_load_permit().is_ok());
+        drop(second);
     }
 
     #[test]

@@ -295,6 +295,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-plugin",
+ "tauri-plugin-dialog",
  "tokio",
  "tokio-util",
  "url",

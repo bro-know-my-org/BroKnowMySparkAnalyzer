@@ -283,6 +283,8 @@ const { message } = createDiscreteApi(["message"], {
     theme: darkTheme,
   },
 });
+const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+const STORED_API_KEY_HANDLE = "__BKMSA_STORED_API_KEY__";
 const report = ref<LoadedReport | null>(null);
 const reportEnvironment = ref<AnyRecord | null>(null);
 const statusKey = ref<StatusKey>("waiting");
@@ -295,6 +297,7 @@ const busy = ref(false);
 const analysisRunId = ref(0);
 const followUpRunId = ref(0);
 const loadRunId = ref(0);
+const credentialLoadRunId = ref(0);
 let componentAlive = true;
 const fetchingReport = ref(false);
 const testing = ref(false);
@@ -501,6 +504,25 @@ watch(debugFeaturesEnabled, (enabled) => {
   }
 });
 
+watch(baseUrl, async (value, previous) => {
+  const normalized = value.trim().replace(/\/$/, "");
+  if (normalized === previous.trim().replace(/\/$/, "")) return;
+  const reloadStoredCredential = apiKey.value === STORED_API_KEY_HANDLE;
+  apiKey.value = "";
+  const requestId = ++credentialLoadRunId.value;
+  if (!reloadStoredCredential) return;
+  try {
+    const loaded = await props.adapter.loadApiKey(value.trim()) ?? "";
+    if (
+      componentAlive
+      && credentialLoadRunId.value === requestId
+      && baseUrl.value.trim().replace(/\/$/, "") === normalized
+    ) apiKey.value = loaded;
+  } catch {
+    if (credentialLoadRunId.value === requestId) apiKey.value = "";
+  }
+});
+
 watch(
   () => props.language,
   (value) => {
@@ -526,6 +548,10 @@ watch([statusKey, status], ([key, text]) => emit("statusChange", { key, text }),
 async function handleFiles(files: FileList | File[]) {
   const file = Array.from(files)[0];
   if (!file) return;
+  if (file.size > MAX_REPORT_BYTES) {
+    message.error("报告超过 64 MiB 限制");
+    return;
+  }
   statusKey.value = "parsing";
   fetchingReport.value = false;
   const loadId = ++loadRunId.value;
@@ -551,11 +577,11 @@ async function installLoadedReport(loadId: number, loaded: LoadedReport) {
     await props.adapter.releaseReport(loaded.reportId).catch(() => undefined);
     return false;
   }
-  await replaceReport(loaded);
+  replaceReport(loaded);
   return componentAlive && loadRunId.value === loadId && report.value?.reportId === loaded.reportId;
 }
 
-async function replaceReport(next: LoadedReport) {
+function replaceReport(next: LoadedReport) {
   const previous = report.value;
   analysisRunId.value += 1;
   followUpRunId.value += 1;
@@ -569,12 +595,13 @@ async function replaceReport(next: LoadedReport) {
   if (previous && previous.reportId !== next.reportId) {
     void props.adapter.releaseReport(previous.reportId).catch(() => undefined);
   }
-  try {
-    const environment = await props.adapter.executeTool(next.reportId, "environment", {}) as AnyRecord;
-    if (report.value?.reportId === next.reportId) reportEnvironment.value = environment;
-  } catch {
-    if (report.value?.reportId === next.reportId) reportEnvironment.value = null;
-  }
+  void props.adapter.executeTool(next.reportId, "environment", {})
+    .then((environment) => {
+      if (report.value?.reportId === next.reportId) reportEnvironment.value = environment as AnyRecord;
+    })
+    .catch(() => {
+      if (report.value?.reportId === next.reportId) reportEnvironment.value = null;
+    });
 }
 
 async function releaseCurrentReport() {
@@ -712,8 +739,10 @@ async function loadLocalAiConfig() {
     return;
   }
   try {
-    apiKey.value = await props.adapter.loadApiKey() ?? legacyApiKey;
-    if (legacyApiKey && apiKey.value === legacyApiKey) await props.adapter.storeApiKey(legacyApiKey);
+    apiKey.value = await props.adapter.loadApiKey(baseUrl.value.trim()) ?? legacyApiKey;
+    if (legacyApiKey && apiKey.value === legacyApiKey) {
+      await props.adapter.storeApiKey(legacyApiKey, baseUrl.value.trim());
+    }
     if (saved && "api_key" in saved) {
       window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
         providerId: saved.providerId,
@@ -736,7 +765,9 @@ async function saveLocalAiConfig() {
       model: model.value.trim(),
       temperature: Number(temperature.value ?? 0.2),
     }));
-    if (apiKey.value.trim()) await props.adapter.storeApiKey(apiKey.value.trim());
+    if (apiKey.value.trim()) {
+      await props.adapter.storeApiKey(apiKey.value.trim(), baseUrl.value.trim());
+    }
     else await props.adapter.deleteApiKey();
     message.success(t.value.msg.aiConfigSaved);
   } catch (error) {
@@ -787,7 +818,12 @@ async function sendFollowUp() {
 function clearAll() {
   loadRunId.value += 1;
   fetchingReport.value = false;
-  if (busy.value) stopAnalysis();
+  const reportId = report.value?.reportId;
+  if (reportId && (busy.value || followUpBusy.value)) {
+    void props.adapter.cancelAnalysis(reportId).catch(() => undefined);
+  }
+  analysisRunId.value += 1;
+  busy.value = false;
   followUpRunId.value += 1;
   followUpBusy.value = false;
   void releaseCurrentReport();
@@ -807,6 +843,8 @@ function renderFollowUp(content: string) {
 function renderMarkdown(content: string) {
   return DOMPurify.sanitize(marked.parse(content, { async: false }) as string, {
     USE_PROFILES: { html: true },
+    FORBID_TAGS: ["img", "picture", "source", "audio", "video", "track", "iframe", "object", "embed", "style"],
+    FORBID_ATTR: ["style", "src", "srcset", "poster", "background"],
   });
 }
 
@@ -828,8 +866,9 @@ async function exportMarkdown() {
       filters: [{ name: "Markdown", extensions: ["md"] }],
     });
     if (!path) return;
-    await props.adapter.saveExportFile(path, stringToBase64(`${markdown}${environment}${source}`));
-    message.success(`${t.value.msg.exported} ${path}`);
+    const savedPath = await props.adapter.saveExportFile(path, stringToBase64(`${markdown}${environment}${source}`));
+    if (!savedPath) return;
+    message.success(`${t.value.msg.exported} ${savedPath}`);
   } catch (error) {
     message.error(`${t.value.msg.exportFailed}: ${String(error)}`);
   }
@@ -852,27 +891,29 @@ async function exportDiagnosisImage() {
     message.warning(t.value.msg.noDiagnosis);
     return;
   }
-  const path = await props.adapter.pickSavePath({
-    defaultPath: `${exportBaseName()}.png`,
-    filters: [{ name: "PNG Image", extensions: ["png"] }],
-  });
-  if (!path) return;
-  const exportNode = document.createElement("section");
-  exportNode.className = `markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
-  exportNode.innerHTML = renderedMarkdown.value;
-  document.body.appendChild(exportNode);
+  let exportNode: HTMLElement | null = null;
   try {
+    const path = await props.adapter.pickSavePath({
+      defaultPath: `${exportBaseName()}.png`,
+      filters: [{ name: "PNG Image", extensions: ["png"] }],
+    });
+    if (!path) return;
+    exportNode = document.createElement("section");
+    exportNode.className = `markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
+    exportNode.innerHTML = renderedMarkdown.value;
+    document.body.appendChild(exportNode);
     const dataUrl = await toPng(exportNode, {
       cacheBust: true,
       pixelRatio: 2,
       backgroundColor: themeMode.value === "dark" ? "#10161b" : "#f8fafb",
     });
-    await props.adapter.saveExportFile(path, dataUrlToBase64(dataUrl));
-    message.success(`${t.value.msg.exported} ${path}`);
+    const savedPath = await props.adapter.saveExportFile(path, dataUrlToBase64(dataUrl));
+    if (!savedPath) return;
+    message.success(`${t.value.msg.exported} ${savedPath}`);
   } catch (error) {
     message.error(`${t.value.msg.exportFailed}: ${String(error)}`);
   } finally {
-    exportNode.remove();
+    exportNode?.remove();
   }
 }
 

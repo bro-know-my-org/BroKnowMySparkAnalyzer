@@ -4,7 +4,8 @@
 
 ```rust
 tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
     .plugin(bkmsa_tauri::init())
 ```
 
-Grant `"bkmsa-tauri:default"` in the application capability. Vue hosts can use `createTauriSparkAnalyzerAdapter()` from `@bro-know-my/spark-analyzer/tauri` instead of writing IPC bindings manually.
+The dialog plugin is required because export writes use a native save dialog and never trust a WebView-provided filesystem path. Grant `"bkmsa-tauri:default"` in the application capability. Vue hosts can use `createTauriSparkAnalyzerAdapter()` from `@bro-know-my/spark-analyzer/tauri` instead of writing IPC bindings manually.

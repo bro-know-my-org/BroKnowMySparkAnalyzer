@@ -19,6 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", default-features = false }
+tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["macros", "rt"] }
 tokio-util = "0.7"
 url.workspace = true

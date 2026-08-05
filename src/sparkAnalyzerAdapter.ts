@@ -20,13 +20,13 @@ type WasmAnalyzer = {
   askFollowUp(reportId: string, config: AiConfig, traces: AgentTrace[], diagnosis: string, history: FollowUpMessage[], question: string): Promise<string>;
   testAiConnection(config: AiConfig): Promise<string>;
   listAiModels(config: AiConfig): Promise<AiModelInfo[]>;
-  loadApiKey?(): Promise<string | null> | string | null;
+  loadApiKey?(baseUrl?: string): Promise<string | null> | string | null;
   storeApiKey?(apiKey: string): Promise<void> | void;
   deleteApiKey?(): Promise<void> | void;
   releaseReport(reportId: string): Promise<void> | void;
 };
 
-const MAX_WEB_REPORT_BYTES = 256 * 1024 * 1024;
+const MAX_WEB_REPORT_BYTES = 64 * 1024 * 1024;
 
 async function readBoundedBody(response: Response): Promise<Uint8Array> {
   if (!response.body) throw new Error("远程报告响应没有可读取的正文");
@@ -39,7 +39,7 @@ async function readBoundedBody(response: Response): Promise<Uint8Array> {
       if (done) break;
       if (length + value.byteLength > MAX_WEB_REPORT_BYTES) {
         await reader.cancel("report size limit exceeded");
-        throw new Error("远程报告超过 256 MiB 限制");
+        throw new Error("远程报告超过 64 MiB 限制");
       }
       chunks.push(value);
       length += value.byteLength;
@@ -64,7 +64,7 @@ let wasmAnalyzerPromise: Promise<WasmAnalyzer> | undefined;
 
 export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
   async loadReportBytes(bytes, source, hint = "") {
-    if (bytes.byteLength > MAX_WEB_REPORT_BYTES) throw new Error("报告超过 256 MiB 限制");
+    if (bytes.byteLength > MAX_WEB_REPORT_BYTES) throw new Error("报告超过 64 MiB 限制");
     if (isTauriRuntime()) {
       return tauriAdapter.loadReportBytes(bytes, source, hint);
     }
@@ -99,7 +99,7 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
     if (!response.ok) throw new Error(`远程服务返回 HTTP ${response.status}`);
     const contentLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(contentLength) && contentLength > MAX_WEB_REPORT_BYTES) {
-      throw new Error("远程报告超过 256 MiB 限制");
+      throw new Error("远程报告超过 64 MiB 限制");
     }
     const bytes = await readBoundedBody(response);
     return analyzer.loadReportBytes(
@@ -148,13 +148,13 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
     return (await wasmAnalyzer()).listAiModels(config);
   },
 
-  async loadApiKey() {
-    if (isTauriRuntime()) return tauriAdapter.loadApiKey();
+  async loadApiKey(baseUrl) {
+    if (isTauriRuntime()) return tauriAdapter.loadApiKey(baseUrl);
     return null;
   },
 
-  async storeApiKey(apiKey) {
-    if (isTauriRuntime()) await tauriAdapter.storeApiKey(apiKey);
+  async storeApiKey(apiKey, baseUrl) {
+    if (isTauriRuntime()) await tauriAdapter.storeApiKey(apiKey, baseUrl);
   },
 
   async deleteApiKey() {
@@ -178,10 +178,10 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
 
   async saveExportFile(path, bytesBase64) {
     if (isTauriRuntime()) {
-      await tauriAdapter.saveExportFile(path, bytesBase64);
-      return;
+      return tauriAdapter.saveExportFile(path, bytesBase64);
     }
     downloadBase64(path, bytesBase64);
+    return path;
   },
 
   async openUrl(url) {

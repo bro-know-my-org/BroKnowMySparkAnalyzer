@@ -6,6 +6,7 @@ import type {
 } from "./adapter";
 
 const command = (name: string) => `plugin:bkmsa|${name}`;
+const MAX_REPORT_BYTES = 64 * 1024 * 1024;
 
 async function invoke<T>(name: string, args: Record<string, unknown>): Promise<T> {
   const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
@@ -32,6 +33,9 @@ function requireHttpUrl(value: string) {
 export function createTauriSparkAnalyzerAdapter(): SparkAnalyzerAdapter {
   return {
     loadReportBytes(bytes, source, hint = "") {
+      if (bytes.byteLength > MAX_REPORT_BYTES) {
+        return Promise.reject(new Error("报告超过 64 MiB 限制"));
+      }
       return invoke<LoadedReport>("analyzer_load_report_bytes", {
         request: { bytes_base64: bytesToBase64(bytes), source, hint },
       });
@@ -79,12 +83,13 @@ export function createTauriSparkAnalyzerAdapter(): SparkAnalyzerAdapter {
       return invoke<AiModelInfo[]>("analyzer_list_ai_models", { config });
     },
 
-    loadApiKey() {
-      return invoke<string | null>("analyzer_load_api_key", {});
+    loadApiKey(baseUrl) {
+      return invoke<string | null>("analyzer_load_api_key", { baseUrl });
     },
 
-    async storeApiKey(apiKey) {
-      await invoke("analyzer_store_api_key", { request: { api_key: apiKey } });
+    async storeApiKey(apiKey, baseUrl) {
+      if (!baseUrl.trim()) throw new Error("API 服务地址不能为空");
+      await invoke("analyzer_store_api_key", { request: { api_key: apiKey, base_url: baseUrl } });
     },
 
     async deleteApiKey() {
@@ -96,12 +101,11 @@ export function createTauriSparkAnalyzerAdapter(): SparkAnalyzerAdapter {
     },
 
     async pickSavePath(options) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      return save(options);
+      return JSON.stringify(options);
     },
 
     async saveExportFile(path, bytesBase64) {
-      await invoke("save_export_file", {
+      return invoke<string | null>("save_export_file", {
         request: { path, bytes_base64: bytesBase64 },
       });
     },
