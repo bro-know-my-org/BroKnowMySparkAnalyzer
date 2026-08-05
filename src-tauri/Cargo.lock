@@ -282,6 +282,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bkmsa-tauri"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bkmsa-agent",
+ "bkmsa-core",
+ "keyring",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -316,21 +335,11 @@ dependencies = [
 name = "bro-know-my-spark-analyzer"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "bkmsa-agent",
- "bkmsa-core",
- "keyring",
- "percent-encoding",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
+ "bkmsa-tauri",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
- "tokio",
- "tokio-util",
- "url",
 ]
 
 [[package]]

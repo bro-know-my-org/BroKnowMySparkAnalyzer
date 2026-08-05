@@ -16,8 +16,8 @@ name = "bkmsa"
 path = "src/main.rs"
 
 [dependencies]
-bkmsa-agent = { path = "../bkmsa-agent", features = ["native-client"] }
-bkmsa-core = { path = "../bkmsa-core" }
+bkmsa-agent = { workspace = true, features = ["native-client"] }
+bkmsa-core.workspace = true
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6"
 percent-encoding = "2"

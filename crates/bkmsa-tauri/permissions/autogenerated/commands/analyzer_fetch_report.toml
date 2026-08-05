@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-fetch-report"
+description = "Enables the analyzer_fetch_report command without any pre-configured scope."
+commands.allow = ["analyzer_fetch_report"]
+
+[[permission]]
+identifier = "deny-analyzer-fetch-report"
+description = "Denies the analyzer_fetch_report command without any pre-configured scope."
+commands.deny = ["analyzer_fetch_report"]

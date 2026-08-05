@@ -1,0 +1,20 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Allows the application to use the complete bkmsa analyzer backend."
+permissions = [
+  "allow-analyzer-load-report-bytes",
+  "allow-analyzer-load-text-report",
+  "allow-analyzer-fetch-report",
+  "allow-analyzer-execute-tool",
+  "allow-analyzer-release-report",
+  "allow-analyzer-run-analysis",
+  "allow-analyzer-cancel-analysis",
+  "allow-analyzer-ask-follow-up",
+  "allow-analyzer-test-ai-connection",
+  "allow-analyzer-list-ai-models",
+  "allow-analyzer-store-api-key",
+  "allow-analyzer-load-api-key",
+  "allow-analyzer-delete-api-key",
+  "allow-save-export-file",
+]

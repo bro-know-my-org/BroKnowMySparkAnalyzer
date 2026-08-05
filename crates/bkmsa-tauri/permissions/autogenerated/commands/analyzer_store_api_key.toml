@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-store-api-key"
+description = "Enables the analyzer_store_api_key command without any pre-configured scope."
+commands.allow = ["analyzer_store_api_key"]
+
+[[permission]]
+identifier = "deny-analyzer-store-api-key"
+description = "Denies the analyzer_store_api_key command without any pre-configured scope."
+commands.deny = ["analyzer_store_api_key"]

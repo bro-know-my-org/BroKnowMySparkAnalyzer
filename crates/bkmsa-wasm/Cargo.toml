@@ -11,8 +11,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-bkmsa-core = { path = "../bkmsa-core" }
-bkmsa-agent = { path = "../bkmsa-agent", default-features = false }
+bkmsa-core.workspace = true
+bkmsa-agent = { workspace = true, default-features = false }
 futures = "0.3"
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-run-analysis"
+description = "Enables the analyzer_run_analysis command without any pre-configured scope."
+commands.allow = ["analyzer_run_analysis"]
+
+[[permission]]
+identifier = "deny-analyzer-run-analysis"
+description = "Denies the analyzer_run_analysis command without any pre-configured scope."
+commands.deny = ["analyzer_run_analysis"]

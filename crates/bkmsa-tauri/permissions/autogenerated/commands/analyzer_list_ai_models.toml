@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-list-ai-models"
+description = "Enables the analyzer_list_ai_models command without any pre-configured scope."
+commands.allow = ["analyzer_list_ai_models"]
+
+[[permission]]
+identifier = "deny-analyzer-list-ai-models"
+description = "Denies the analyzer_list_ai_models command without any pre-configured scope."
+commands.deny = ["analyzer_list_ai_models"]

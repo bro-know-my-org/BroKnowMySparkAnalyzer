@@ -1,0 +1,27 @@
+[package]
+name = "bkmsa-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable Tauri plugin for the bkmsa Spark analyzer"
+readme = "README.md"
+keywords = ["tauri", "spark", "minecraft", "diagnostics"]
+links = "bkmsa-tauri"
+
+[dependencies]
+base64 = "0.22"
+bkmsa-agent = { workspace = true, features = ["native-client"] }
+bkmsa-core.workspace = true
+keyring = "3"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", default-features = false }
+tokio = { version = "1", features = ["macros", "rt"] }
+tokio-util = "0.7"
+url.workspace = true
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

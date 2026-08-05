@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-ask-follow-up"
+description = "Enables the analyzer_ask_follow_up command without any pre-configured scope."
+commands.allow = ["analyzer_ask_follow_up"]
+
+[[permission]]
+identifier = "deny-analyzer-ask-follow-up"
+description = "Denies the analyzer_ask_follow_up command without any pre-configured scope."
+commands.deny = ["analyzer_ask_follow_up"]

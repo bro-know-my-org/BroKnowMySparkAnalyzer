@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-execute-tool"
+description = "Enables the analyzer_execute_tool command without any pre-configured scope."
+commands.allow = ["analyzer_execute_tool"]
+
+[[permission]]
+identifier = "deny-analyzer-execute-tool"
+description = "Denies the analyzer_execute_tool command without any pre-configured scope."
+commands.deny = ["analyzer_execute_tool"]

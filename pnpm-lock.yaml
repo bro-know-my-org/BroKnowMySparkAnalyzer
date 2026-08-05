@@ -54,6 +54,15 @@ importers:
 
   packages/spark-analyzer:
     dependencies:
+      '@tauri-apps/api':
+        specifier: ^2
+        version: 2.11.0
+      '@tauri-apps/plugin-dialog':
+        specifier: ^2
+        version: 2.7.1
+      '@tauri-apps/plugin-opener':
+        specifier: ^2
+        version: 2.5.4
       '@vicons/fa':
         specifier: ^0.13.0
         version: 0.13.0

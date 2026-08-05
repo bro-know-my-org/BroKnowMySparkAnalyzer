@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+description = "Spark report parsing and deterministic analysis core for bkmsa"
+readme = "README.md"
+keywords = ["spark", "minecraft", "profiling", "diagnostics"]
 build = "build.rs"
 
 [dependencies]

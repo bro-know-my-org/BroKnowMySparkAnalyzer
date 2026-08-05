@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-test-ai-connection"
+description = "Enables the analyzer_test_ai_connection command without any pre-configured scope."
+commands.allow = ["analyzer_test_ai_connection"]
+
+[[permission]]
+identifier = "deny-analyzer-test-ai-connection"
+description = "Denies the analyzer_test_ai_connection command without any pre-configured scope."
+commands.deny = ["analyzer_test_ai_connection"]

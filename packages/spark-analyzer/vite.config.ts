@@ -5,12 +5,23 @@ export default defineConfig({
   plugins: [vue()],
   build: {
     lib: {
-      entry: "src/index.ts",
+      entry: {
+        index: "src/index.ts",
+        tauri: "src/tauri.ts",
+      },
       formats: ["es"],
-      fileName: "index",
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: ["vue", "naive-ui", "@vicons/fa", "@vicons/fluent"],
+      external: [
+        "vue",
+        "naive-ui",
+        "@vicons/fa",
+        "@vicons/fluent",
+        "@tauri-apps/api/core",
+        "@tauri-apps/plugin-dialog",
+        "@tauri-apps/plugin-opener",
+      ],
       output: {
         assetFileNames: (assetInfo) => {
           if (assetInfo.name?.endsWith(".css")) return "style.css";

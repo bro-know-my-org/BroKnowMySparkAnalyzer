@@ -9,6 +9,7 @@ import type {
   SavePathOptions,
   SparkAnalyzerAdapter,
 } from "../packages/spark-analyzer/src";
+import { createTauriSparkAnalyzerAdapter } from "../packages/spark-analyzer/src/tauri";
 
 type WasmAnalyzer = {
   loadReportBytes(bytes: Uint8Array, source: string, hint?: string): Promise<LoadedReport> | LoadedReport;
@@ -57,28 +58,28 @@ async function readBoundedBody(response: Response): Promise<Uint8Array> {
 
 export const isTauriRuntime = () => "__TAURI_INTERNALS__" in window;
 
+const tauriAdapter = createTauriSparkAnalyzerAdapter();
+
 let wasmAnalyzerPromise: Promise<WasmAnalyzer> | undefined;
 
 export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
   async loadReportBytes(bytes, source, hint = "") {
     if (bytes.byteLength > MAX_WEB_REPORT_BYTES) throw new Error("报告超过 256 MiB 限制");
     if (isTauriRuntime()) {
-      return invoke<LoadedReport>("analyzer_load_report_bytes", {
-        request: { bytes_base64: bytesToBase64(bytes), source, hint },
-      });
+      return tauriAdapter.loadReportBytes(bytes, source, hint);
     }
     return (await wasmAnalyzer()).loadReportBytes(bytes, source, hint);
   },
 
   async loadTextReport(text, source) {
     if (isTauriRuntime()) {
-      return invoke<LoadedReport>("analyzer_load_text_report", { request: { text, source } });
+      return tauriAdapter.loadTextReport(text, source);
     }
     return (await wasmAnalyzer()).loadTextReport(text, source);
   },
 
   async fetchReport(input) {
-    if (isTauriRuntime()) return invoke<LoadedReport>("analyzer_fetch_report", { input });
+    if (isTauriRuntime()) return tauriAdapter.fetchReport(input);
     const analyzer = await wasmAnalyzer();
     const resolvedUrl = resolveSparkReportUrl(input);
     const configuredProxy = import.meta.env.VITE_SPARK_PROXY_URL?.trim();
@@ -110,21 +111,21 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
 
   async executeTool(reportId, tool, args = {}) {
     if (isTauriRuntime()) {
-      return invoke("analyzer_execute_tool", { request: { report_id: reportId, tool, args } });
+      return tauriAdapter.executeTool(reportId, tool, args);
     }
     return (await wasmAnalyzer()).executeTool(reportId, tool, args);
   },
 
   async runAnalysis(reportId, config) {
     if (isTauriRuntime()) {
-      return invoke<AnalysisResult>("analyzer_run_analysis", { request: { report_id: reportId, config } });
+      return tauriAdapter.runAnalysis(reportId, config);
     }
     return (await wasmAnalyzer()).runAnalysis(reportId, config);
   },
 
   async cancelAnalysis(reportId) {
     if (isTauriRuntime()) {
-      return invoke<boolean>("analyzer_cancel_analysis", { request: { report_id: reportId } });
+      return tauriAdapter.cancelAnalysis(reportId);
     }
     const analyzer = await wasmAnalyzer();
     return analyzer.cancelAnalysis ? analyzer.cancelAnalysis(reportId) : false;
@@ -132,39 +133,37 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
 
   async askFollowUp(reportId, config, traces, diagnosis, history, question) {
     if (isTauriRuntime()) {
-      return invoke<string>("analyzer_ask_follow_up", {
-        request: { report_id: reportId, config, traces, diagnosis, history, question },
-      });
+      return tauriAdapter.askFollowUp(reportId, config, traces, diagnosis, history, question);
     }
     return (await wasmAnalyzer()).askFollowUp(reportId, config, traces, diagnosis, history, question);
   },
 
   async testAiConnection(config) {
-    if (isTauriRuntime()) return invoke<string>("analyzer_test_ai_connection", { config });
+    if (isTauriRuntime()) return tauriAdapter.testAiConnection(config);
     return (await wasmAnalyzer()).testAiConnection(config);
   },
 
   async listAiModels(config) {
-    if (isTauriRuntime()) return invoke<AiModelInfo[]>("analyzer_list_ai_models", { config });
+    if (isTauriRuntime()) return tauriAdapter.listAiModels(config);
     return (await wasmAnalyzer()).listAiModels(config);
   },
 
   async loadApiKey() {
-    if (isTauriRuntime()) return invoke<string | null>("analyzer_load_api_key", {});
+    if (isTauriRuntime()) return tauriAdapter.loadApiKey();
     return null;
   },
 
   async storeApiKey(apiKey) {
-    if (isTauriRuntime()) await invoke("analyzer_store_api_key", { request: { api_key: apiKey } });
+    if (isTauriRuntime()) await tauriAdapter.storeApiKey(apiKey);
   },
 
   async deleteApiKey() {
-    if (isTauriRuntime()) await invoke("analyzer_delete_api_key", {});
+    if (isTauriRuntime()) await tauriAdapter.deleteApiKey();
   },
 
   async releaseReport(reportId) {
     if (isTauriRuntime()) {
-      await invoke("analyzer_release_report", { request: { report_id: reportId } });
+      await tauriAdapter.releaseReport(reportId);
       return;
     }
     await (await wasmAnalyzer()).releaseReport(reportId);
@@ -172,15 +171,14 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
 
   async pickSavePath(options: SavePathOptions) {
     if (isTauriRuntime()) {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      return save(options);
+      return tauriAdapter.pickSavePath(options);
     }
     return options.defaultPath;
   },
 
   async saveExportFile(path, bytesBase64) {
     if (isTauriRuntime()) {
-      await invoke("save_export_file", { request: { path, bytes_base64: bytesBase64 } });
+      await tauriAdapter.saveExportFile(path, bytesBase64);
       return;
     }
     downloadBase64(path, bytesBase64);
@@ -189,19 +187,13 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
   async openUrl(url) {
     const safeUrl = requireHttpUrl(url, "打开链接");
     if (isTauriRuntime()) {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(safeUrl);
+      await tauriAdapter.openUrl(safeUrl);
       return;
     }
     const opened = window.open(safeUrl, "_blank", "noopener,noreferrer");
     if (!opened) throw new Error("浏览器阻止了新窗口，请允许本站打开弹窗后重试");
   },
 };
-
-async function invoke<T>(command: string, args: Record<string, unknown>): Promise<T> {
-  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
-  return tauriInvoke<T>(command, args);
-}
 
 async function wasmAnalyzer(): Promise<WasmAnalyzer> {
   if (wasmAnalyzerPromise) return wasmAnalyzerPromise;
@@ -283,12 +275,4 @@ function downloadBase64(path: string, value: string) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
 }

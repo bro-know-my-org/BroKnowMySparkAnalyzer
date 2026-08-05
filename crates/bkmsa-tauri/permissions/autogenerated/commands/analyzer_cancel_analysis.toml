@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-analyzer-cancel-analysis"
+description = "Enables the analyzer_cancel_analysis command without any pre-configured scope."
+commands.allow = ["analyzer_cancel_analysis"]
+
+[[permission]]
+identifier = "deny-analyzer-cancel-analysis"
+description = "Denies the analyzer_cancel_analysis command without any pre-configured scope."
+commands.deny = ["analyzer_cancel_analysis"]

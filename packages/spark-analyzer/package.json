@@ -33,6 +33,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./tauri": {
+      "types": "./dist/tauri.d.ts",
+      "import": "./dist/tauri.js"
+    },
     "./style.css": "./dist/style.css"
   },
   "scripts": {
@@ -41,10 +45,24 @@
     "prepublishOnly": "pnpm run build"
   },
   "peerDependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
     "@vicons/fa": "^0.13.0",
     "@vicons/fluent": "^0.13.0",
     "naive-ui": "^2.43.0",
     "vue": "^3.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@tauri-apps/api": {
+      "optional": true
+    },
+    "@tauri-apps/plugin-dialog": {
+      "optional": true
+    },
+    "@tauri-apps/plugin-opener": {
+      "optional": true
+    }
   },
   "dependencies": {
     "dompurify": "^3.4.11",
