@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 use url::Url;
 
 const SPARK_CONTENT_ORIGIN: &str = "https://spark-usercontent.lucko.me/";
-const MAX_REPORT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_REPORT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReportInput {
@@ -113,12 +113,7 @@ pub async fn load_report(source: &str) -> Result<ReportInput, CliError> {
     }
     let final_url = response.url().clone();
     let mut response = response;
-    let mut bytes = Vec::with_capacity(
-        response
-            .content_length()
-            .unwrap_or_default()
-            .min(MAX_REPORT_BYTES as u64) as usize,
-    );
+    let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await

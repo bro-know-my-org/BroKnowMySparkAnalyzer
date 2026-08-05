@@ -39,7 +39,9 @@ fn resolve_source(report: &Report, hotspot: &StackHotspot) -> Option<(String, Va
 }
 
 pub(super) fn resolve_source_id(report: &Report, hotspot: &StackHotspot) -> Option<String> {
-    resolve_source(report, hotspot).map(|(id, _)| id)
+    resolve_source(report, hotspot)
+        .map(|(id, _)| id)
+        .filter(|id| !id.is_empty() && id != "unknown")
 }
 
 pub(super) fn has_source_maps(report: &Report) -> bool {
@@ -66,7 +68,10 @@ pub(super) fn mod_sources(report: &Report, limit: usize) -> Value {
 
     for hotspot in &report.summary.top_hotspots {
         let resolved = resolve_source(report, hotspot);
-        let source_key = resolved.as_ref().map(|(id, _)| id.clone());
+        let source_key = resolved
+            .as_ref()
+            .map(|(id, _)| id.clone())
+            .filter(|id| !id.is_empty() && id != "unknown");
         if source_key.is_none() && unresolved_hotspots.len() < 12 {
             unresolved_hotspots.push(hotspot.clone());
         }

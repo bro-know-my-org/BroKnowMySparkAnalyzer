@@ -1,6 +1,7 @@
 use crate::{cli::OutputFormat, error::CliError};
 use serde::Serialize;
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -15,7 +16,11 @@ pub fn render_value(format: OutputFormat, title: &str, value: &Value) -> Result<
             serde_json::to_string_pretty(value)
                 .map_err(|error| CliError::Output(error.to_string()))?
         )),
-        OutputFormat::Terminal => Ok(render_terminal(value, 0)),
+        OutputFormat::Terminal => {
+            let mut output = String::new();
+            render_terminal(value, 0, &mut output);
+            Ok(output)
+        }
     }
 }
 
@@ -53,50 +58,56 @@ pub async fn emit(text: &str, output: Option<&Path>) -> Result<(), CliError> {
     }
 }
 
-fn render_terminal(value: &Value, depth: usize) -> String {
+fn render_terminal(value: &Value, depth: usize, output: &mut String) {
     if depth >= 64 {
-        return format!("{}<depth limit reached>\n", "  ".repeat(depth));
+        let _ = writeln!(output, "{}<depth limit reached>", "  ".repeat(depth));
+        return;
     }
     match value {
         Value::Object(map) => {
             if map.is_empty() {
-                return format!("{}{{}}\n", "  ".repeat(depth));
+                let _ = writeln!(output, "{}{{}}", "  ".repeat(depth));
+                return;
             }
-            let mut output = String::new();
             for (key, value) in map {
                 let indent = "  ".repeat(depth);
                 match value {
                     Value::Array(_) | Value::Object(_) => {
-                        output.push_str(&format!("{indent}{}:\n", escape_terminal(key)));
-                        output.push_str(&render_terminal(value, depth + 1));
+                        let _ = writeln!(output, "{indent}{}:", escape_terminal(key));
+                        render_terminal(value, depth + 1, output);
                     }
-                    _ => output.push_str(&format!(
-                        "{indent}{}: {}\n",
-                        escape_terminal(key),
-                        scalar(value)
-                    )),
+                    _ => {
+                        let _ = writeln!(
+                            output,
+                            "{indent}{}: {}",
+                            escape_terminal(key),
+                            scalar(value)
+                        );
+                    }
                 }
             }
-            output
         }
         Value::Array(values) => {
             if values.is_empty() {
-                return format!("{}[]\n", "  ".repeat(depth));
+                let _ = writeln!(output, "{}[]", "  ".repeat(depth));
+                return;
             }
-            values
-                .iter()
-                .map(|value| {
-                    let indent = "  ".repeat(depth);
-                    match value {
-                        Value::Object(_) | Value::Array(_) => {
-                            format!("{indent}-\n{}", render_terminal(value, depth + 1))
-                        }
-                        _ => format!("{indent}- {}\n", scalar(value)),
+            for value in values {
+                let indent = "  ".repeat(depth);
+                match value {
+                    Value::Object(_) | Value::Array(_) => {
+                        let _ = writeln!(output, "{indent}-");
+                        render_terminal(value, depth + 1, output);
                     }
-                })
-                .collect()
+                    _ => {
+                        let _ = writeln!(output, "{indent}- {}", scalar(value));
+                    }
+                }
+            }
         }
-        _ => format!("{}{}\n", "  ".repeat(depth), scalar(value)),
+        _ => {
+            let _ = writeln!(output, "{}{}", "  ".repeat(depth), scalar(value));
+        }
     }
 }
 
@@ -109,16 +120,24 @@ fn scalar(value: &Value) -> String {
 }
 
 fn escape_terminal(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| {
-            if character.is_control() {
-                character.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![character]
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() || is_bidi_control(character) {
+            for escaped in character.escape_default() {
+                output.push(escaped);
             }
-        })
-        .collect()
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn markdown_heading(value: &str) -> String {

@@ -533,7 +533,7 @@ pub(crate) fn classify_frame(label: &str) -> &'static str {
         "commands"
     } else if l.contains("level.tick") || l.contains("serverlevel") || l.contains("tickchildren") {
         "world_tick"
-    } else if l.contains("filesystem") || l.contains("file") || l.contains("io.") {
+    } else if is_io_frame(&l) {
         "io"
     } else if l.contains("gc") || l.contains("g1") || l.contains("shenandoah") || l.contains("zgc")
     {
@@ -541,6 +541,17 @@ pub(crate) fn classify_frame(label: &str) -> &'static str {
     } else {
         "other"
     }
+}
+
+pub(crate) fn is_io_frame(lower_label: &str) -> bool {
+    lower_label.contains("filesystem")
+        || lower_label.contains("java.io.")
+        || lower_label.contains("java.nio.")
+        || lower_label.contains("sun.nio.")
+        || lower_label.contains("fileinputstream")
+        || lower_label.contains("fileoutputstream")
+        || lower_label.contains("files.new")
+        || lower_label.contains("filechannel")
 }
 
 pub(crate) fn is_server_thread_name(thread: &str) -> bool {
@@ -618,5 +629,7 @@ mod tests {
             classify_frame("net.minecraft.server.level.ServerChunkCache.tick"),
             "chunk_task"
         );
+        assert_eq!(classify_frame("sun.nio.ch.FileDispatcherImpl.read0"), "io");
+        assert_eq!(classify_frame("example.Profiler.tick"), "other");
     }
 }

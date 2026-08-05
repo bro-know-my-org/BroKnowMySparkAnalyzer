@@ -246,22 +246,6 @@ fn collect_recurring_families(paths: &Value, report: &Report, limit: usize) -> V
     result
 }
 
-fn entity_locations(chunks: &Value) -> HashMap<String, Vec<Value>> {
-    let mut locations: HashMap<String, Vec<Value>> = HashMap::new();
-    for chunk in chunks["topChunks"].as_array().into_iter().flatten() {
-        for entity in chunk["topEntities"].as_array().into_iter().flatten() {
-            let Some(name) = entity["name"].as_str() else {
-                continue;
-            };
-            locations.entry(name.to_owned()).or_default().push(json!({
-                "world": chunk["world"], "x": chunk["x"], "z": chunk["z"],
-                "chunkEntities": chunk["totalEntities"], "count": entity["value"],
-            }));
-        }
-    }
-    locations
-}
-
 fn worst_window(windows: &Value) -> Option<&Value> {
     windows
         .get("worstByMaxMspt")
@@ -286,12 +270,12 @@ fn group_by_kind(links: &[Value]) -> Value {
 
 pub(super) fn evidence_links(report: &Report, limit: usize) -> Value {
     let groups = hotspot_groups(report, limit.max(16));
-    let sources = mod_sources(report, limit.saturating_mul(4).max(64));
+    let internal_limit = limit.saturating_mul(4).clamp(64, 256);
+    let sources = mod_sources(report, internal_limit);
     let chunks = entity_chunks(report, limit.max(24));
     let windows = crate::windows::worst_windows(report, 6);
-    let paths = crate::hot_paths::execute(report, "auto", limit.saturating_mul(4).max(64));
+    let paths = crate::hot_paths::execute(report, "auto", internal_limit);
     let memory = crate::memory_gc::summarize_memory_gc(report);
-    let locations = entity_locations(&chunks);
     let worst = worst_window(&windows);
     let mut links = Vec::new();
 
@@ -350,27 +334,12 @@ pub(super) fn evidence_links(report: &Report, limit: usize) -> Value {
         }
         let mod_source = mod_sources_by_id.get(source_id).copied();
         let categories = source["categories"].as_array().cloned().unwrap_or_default();
-        let mut matched_entities = source["matchedEntities"]
+        let matched_entities = source["matchedEntities"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|candidate| candidate["entityId"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
-        let source_token = normalized(source_id);
-        let same_namespace: Vec<_> = locations
-            .iter()
-            .filter(|(entity, _)| {
-                normalized(entity.split(':').next().unwrap_or_default()) == source_token
-            })
-            .flat_map(|(entity, values)| values.iter().map(move |location| (entity, location)))
-            .take(4)
-            .map(|(entity, location)| json!({"entity":entity,"location":location}))
-            .collect();
-        matched_entities.extend(
-            same_namespace
-                .iter()
-                .filter_map(|item| item["entity"].as_str().map(str::to_owned)),
-        );
         let category_evidence = categories
             .iter()
             .filter_map(Value::as_str)
@@ -414,12 +383,6 @@ pub(super) fn evidence_links(report: &Report, limit: usize) -> Value {
         if !category_evidence.is_empty() {
             evidence.push(format!("hotspot_groups: {}", category_evidence.join("; ")));
         }
-        if !same_namespace.is_empty() {
-            evidence.push(format!(
-                "entity_chunks same namespace: {} locations",
-                same_namespace.len()
-            ));
-        }
         links.push(json!({
             "kind": "source",
             "id": source_id,
@@ -428,13 +391,13 @@ pub(super) fn evidence_links(report: &Report, limit: usize) -> Value {
                 source["maxPercent"].as_f64().unwrap_or_default() >= 1.0,
                 mod_source.is_some(),
                 !category_evidence.is_empty(),
-                !same_namespace.is_empty(),
+                !matched_entities.is_empty(),
             ]),
             "categories": categories,
-            "evidenceSources":evidence_sources(["hot_paths",if mod_source.is_some(){"mod_sources"}else{""},if !category_evidence.is_empty(){"hotspot_groups"}else{""},if !same_namespace.is_empty(){"entity_chunks"}else{""}]),
+            "evidenceSources":evidence_sources(["hot_paths",if mod_source.is_some(){"mod_sources"}else{""},if !category_evidence.is_empty(){"hotspot_groups"}else{""}]),
             "evidence":evidence,
             "matchedEntities": matched_entities,
-            "entityLocations": same_namespace,
+            "entityLocations": [],
             "interpretation":if mod_source.is_some(){"同一来源同时出现在 hot_paths 终端帧和 mod_sources，优先级高。"}else{"来源来自 hot_paths 终端帧；即使 mod_sources 未单独汇总，也应作为路径候选。"},
         }));
     }
@@ -598,12 +561,22 @@ mod tests {
         assert!(value["byKind"]["recurring_frame_family"]
             .as_array()
             .is_none_or(Vec::is_empty));
+        let source = value["byKind"]["source"]
+            .as_array()
+            .and_then(|links| links.iter().find(|link| link["id"] == "worker"))
+            .unwrap();
+        assert_eq!(source["matchedEntities"], json!(["worker:worker_entity"]));
+        assert_eq!(source["entityLocations"], json!([]));
         assert!(value["strongestLinks"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|link| link["evidenceSources"]
-                .as_array()
-                .is_some_and(|sources| sources.len() >= 3)));
+            .any(|link| link["kind"] == "entity"
+                && link["evidenceSources"]
+                    .as_array()
+                    .is_some_and(|sources| sources.len() == 2)
+                && link["locations"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())));
     }
 }

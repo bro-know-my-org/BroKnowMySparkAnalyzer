@@ -83,7 +83,6 @@ pub(crate) fn worst_windows(report: &Report, limit: usize) -> Value {
     let mut max = enriched
         .iter()
         .filter(|row| f64_at(row, "msptMax").is_some())
-        .cloned()
         .collect::<Vec<_>>();
     max.sort_by(|a, b| {
         f64_at(b, "msptMax")
@@ -93,7 +92,6 @@ pub(crate) fn worst_windows(report: &Report, limit: usize) -> Value {
     let mut median = enriched
         .iter()
         .filter(|row| f64_at(row, "msptMedian").is_some())
-        .cloned()
         .collect::<Vec<_>>();
     median.sort_by(|a, b| {
         f64_at(b, "msptMedian")
@@ -101,7 +99,7 @@ pub(crate) fn worst_windows(report: &Report, limit: usize) -> Value {
             .total_cmp(&f64_at(a, "msptMedian").unwrap_or_default())
     });
     let mut low_tps = enriched
-        .into_iter()
+        .iter()
         .filter(|row| f64_at(row, "tps").is_some())
         .collect::<Vec<_>>();
     low_tps.sort_by(|a, b| {
@@ -109,7 +107,7 @@ pub(crate) fn worst_windows(report: &Report, limit: usize) -> Value {
             .unwrap_or(20.0)
             .total_cmp(&f64_at(b, "tps").unwrap_or(20.0))
     });
-    json!({"worstByMaxMspt":max.into_iter().take(limit).collect::<Vec<_>>(),"worstByMedianMspt":median.into_iter().take(limit).collect::<Vec<_>>(),"lowTpsWindows":low_tps.into_iter().take(limit).collect::<Vec<_>>()})
+    json!({"worstByMaxMspt":max.into_iter().take(limit).cloned().collect::<Vec<_>>(),"worstByMedianMspt":median.into_iter().take(limit).cloned().collect::<Vec<_>>(),"lowTpsWindows":low_tps.into_iter().take(limit).cloned().collect::<Vec<_>>()})
 }
 
 #[cfg(test)]

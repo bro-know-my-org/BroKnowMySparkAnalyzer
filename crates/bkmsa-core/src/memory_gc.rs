@@ -1,6 +1,7 @@
 use crate::analysis::{arr_at, f64_at, format_number, i64_at, obj_at, path, str_at};
 use crate::{Finding, Report, Severity};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 fn ratio(used: f64, total: f64) -> Option<f64> {
     if !used.is_finite() || !total.is_finite() || used < 0.0 || total <= 0.0 || used > total {
@@ -11,7 +12,7 @@ fn ratio(used: f64, total: f64) -> Option<f64> {
 }
 
 fn format_bytes(value: i64) -> String {
-    if value <= 0 {
+    if value < 0 {
         return "-".into();
     }
     let units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -72,17 +73,17 @@ fn heap_signals(heap: Option<&Value>) -> Vec<Value> {
 
 fn non_heap_signals(non_heap: Option<&Value>) -> Vec<Value> {
     let summary = usage_summary(non_heap);
-    let ratio = f64_at(&summary, "usedCommittedRatio").unwrap_or_default();
+    let ratio = f64_at(&summary, "usedMaxRatio").unwrap_or_default();
     if ratio >= 0.9 {
         vec![signal(
             "memory",
             if ratio >= 0.97 { "critical" } else { "warning" },
-            "非堆内存接近 committed 容量".into(),
+            "非堆内存接近上限".into(),
             format!(
-                "non-heap used/committed {}% ({} / {}); max is often unspecified for non-heap pools",
+                "non-heap used/max {}% ({} / {})",
                 format_number(ratio * 100.0),
                 summary["usedFormatted"].as_str().unwrap_or("-"),
-                summary["committedFormatted"].as_str().unwrap_or("-")
+                summary["maxFormatted"].as_str().unwrap_or("-")
             ),
         )]
     } else {
@@ -96,21 +97,21 @@ fn pool_signals(name: &str, usage: Option<&Value>, collection: Option<&Value>) -
     let lower = name.to_lowercase();
     let old = lower.contains("old") || lower.contains("tenured");
     let mut signals = vec![];
-    let used_committed = f64_at(&current, "usedCommittedRatio").unwrap_or_default();
-    if old && used_committed >= 0.8 {
+    let used_max = f64_at(&current, "usedMaxRatio").unwrap_or_default();
+    if old && used_max >= 0.8 {
         signals.push(signal(
             "memory",
-            if used_committed >= 0.92 {
+            if used_max >= 0.92 {
                 "critical"
             } else {
                 "warning"
             },
             format!("{name} 使用率偏高"),
             format!(
-                "used/committed {}% ({} / {})",
-                format_number(used_committed * 100.0),
+                "used/max {}% ({} / {})",
+                format_number(used_max * 100.0),
                 current["usedFormatted"].as_str().unwrap_or("-"),
-                current["committedFormatted"].as_str().unwrap_or("-")
+                current["maxFormatted"].as_str().unwrap_or("-")
             ),
         ));
     }
@@ -205,13 +206,16 @@ pub(crate) fn summarize_memory_gc(report: &Report) -> Value {
 fn summarize_memory_gc_raw(raw: &Value) -> Value {
     let heap = path(raw, "metadata.platformStatistics.memory.heap");
     let non_heap = path(raw, "metadata.platformStatistics.memory.nonHeap");
-    let pools=arr_at(raw,"metadata.platformStatistics.memory.pools").into_iter().flatten().map(|pool| {
+    let pools=arr_at(raw,"metadata.platformStatistics.memory.pools").into_iter().flatten().filter_map(|pool| {
         let usage=path(pool,"usage");
         let collection=path(pool,"collectionUsage");
+        if usage.and_then(|value| i64_at(value,"used")).is_none() && collection.and_then(|value| i64_at(value,"used")).is_none() {
+            return None;
+        }
         let name=str_at(pool,"name").unwrap_or_default();
-        json!({"name":name,"usage":usage_summary(usage),"collectionUsage":usage_summary(collection),"signals":pool_signals(name,usage,collection)})
+        Some(json!({"name":name,"usage":usage_summary(usage),"collectionUsage":usage_summary(collection),"signals":pool_signals(name,usage,collection)}))
     }).collect::<Vec<_>>();
-    let mut gc_collectors = [
+    let gc_collectors = [
         ("system", obj_at(raw, "metadata.systemStatistics.gc")),
         (
             "platform",
@@ -221,17 +225,68 @@ fn summarize_memory_gc_raw(raw: &Value) -> Value {
     .into_iter()
     .flat_map(|(source, collectors)| {
         collectors.into_iter().flat_map(move |collectors| {
-            collectors.iter().map(move |(name, gc)| {
+            collectors.iter().filter_map(move |(name, gc)| {
                 let avg_frequency_ms = f64_at(gc, "avgFrequency");
-                json!({"source":source,"name":name,"total":i64_at(gc,"total").unwrap_or_default(),"avgTimeMs":f64_at(gc,"avgTime"),"avgFrequencyMs":avg_frequency_ms,"avgFrequencySeconds":avg_frequency_ms.map(|value| value/1000.0),"signals":gc_signals(name,gc)})
+                let total = i64_at(gc,"total");
+                let avg_time = f64_at(gc,"avgTime");
+                (total.is_some() || avg_time.is_some() || avg_frequency_ms.is_some()).then(|| json!({"source":source,"name":name,"total":total.unwrap_or_default(),"avgTimeMs":avg_time,"avgFrequencyMs":avg_frequency_ms,"avgFrequencySeconds":avg_frequency_ms.map(|value| value/1000.0),"signals":gc_signals(name,gc)}))
             })
         })
     })
     .collect::<Vec<_>>();
+    let mut merged_collectors = HashMap::new();
+    for mut collector in gc_collectors {
+        let key = (
+            collector["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            collector["total"].as_i64().unwrap_or_default(),
+            collector["avgTimeMs"].as_f64().map(f64::to_bits),
+            collector["avgFrequencyMs"].as_f64().map(f64::to_bits),
+        );
+        let source = collector["source"].clone();
+        collector["sources"] = json!([source]);
+        let existing = merged_collectors.entry(key).or_insert(collector);
+        if !existing["sources"]
+            .as_array()
+            .is_some_and(|sources| sources.contains(&source))
+        {
+            existing["sources"].as_array_mut().unwrap().push(source);
+        }
+    }
+    let mut gc_collectors = merged_collectors.into_values().collect::<Vec<_>>();
     gc_collectors.sort_by(|a, b| {
         f64_at(b, "avgTimeMs")
             .unwrap_or_default()
             .total_cmp(&f64_at(a, "avgTimeMs").unwrap_or_default())
+            .then_with(|| {
+                f64_at(b, "avgTimeMs")
+                    .is_some()
+                    .cmp(&f64_at(a, "avgTimeMs").is_some())
+            })
+            .then_with(|| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(b["name"].as_str().unwrap_or_default())
+            })
+            .then_with(|| {
+                a["total"]
+                    .as_i64()
+                    .unwrap_or_default()
+                    .cmp(&b["total"].as_i64().unwrap_or_default())
+            })
+            .then_with(|| {
+                f64_at(a, "avgFrequencyMs")
+                    .unwrap_or_default()
+                    .total_cmp(&f64_at(b, "avgFrequencyMs").unwrap_or_default())
+            })
+            .then_with(|| {
+                f64_at(b, "avgFrequencyMs")
+                    .is_some()
+                    .cmp(&f64_at(a, "avgFrequencyMs").is_some())
+            })
     });
     let mut signals = heap_signals(heap);
     signals.extend(non_heap_signals(non_heap));
@@ -245,8 +300,12 @@ fn summarize_memory_gc_raw(raw: &Value) -> Value {
             .iter()
             .flat_map(|gc| gc["signals"].as_array().into_iter().flatten().cloned()),
     );
-    let available =
-        heap.is_some() || non_heap.is_some() || !pools.is_empty() || !gc_collectors.is_empty();
+    let available = usage_summary(heap)["available"].as_bool().unwrap_or(false)
+        || usage_summary(non_heap)["available"]
+            .as_bool()
+            .unwrap_or(false)
+        || !pools.is_empty()
+        || !gc_collectors.is_empty();
     json!({"available":available,"heap":usage_summary(heap),"nonHeap":usage_summary(non_heap),"pools":pools,"gcCollectors":gc_collectors,"signals":signals,"interpretation":interpretation(&signals,available)})
 }
 

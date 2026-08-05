@@ -50,7 +50,15 @@ async fn parse_source(source: &str, force_text: bool) -> Result<bkmsa_core::Repo
         input.hint.to_ascii_lowercase().as_str(),
         "txt" | "log" | "md"
     );
-    if force_text || text_hint {
+    if force_text {
+        let text = String::from_utf8(input.bytes).map_err(|error| {
+            CliError::Decode(format!("text report is not valid UTF-8: {error}"))
+        })?;
+        return bkmsa_core::parse_text_report(text, input.source)
+            .map_err(|error| CliError::Decode(error.to_string()));
+    }
+
+    if text_hint && looks_like_text(&input.bytes) {
         let text = String::from_utf8(input.bytes).map_err(|error| {
             CliError::Decode(format!("text report is not valid UTF-8: {error}"))
         })?;
@@ -60,6 +68,17 @@ async fn parse_source(source: &str, force_text: bool) -> Result<bkmsa_core::Repo
 
     bkmsa_core::parse_report_bytes(&input.bytes, input.source, &input.hint)
         .map_err(|error| CliError::Decode(error.to_string()))
+}
+
+fn looks_like_text(bytes: &[u8]) -> bool {
+    if std::str::from_utf8(bytes).is_err() || bytes.contains(&0) {
+        return false;
+    }
+    let suspicious = bytes
+        .iter()
+        .filter(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\r' | b'\t' | 0x1b))
+        .count();
+    suspicious <= 4.max(bytes.len() / 100)
 }
 
 async fn run_tool(args: ToolArgs) -> Result<(), CliError> {
@@ -174,4 +193,15 @@ pub fn parse_tool_args(json_args: Option<&str>, pairs: &[String]) -> Result<Valu
         }
     }
     Ok(Value::Object(args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_text;
+
+    #[test]
+    fn text_detection_accepts_ansi_logs_and_rejects_binary_nul() {
+        assert!(looks_like_text(b"\x1b[31mCan't keep up!\x1b[0m\n"));
+        assert!(!looks_like_text(b"spark\0protobuf"));
+    }
 }

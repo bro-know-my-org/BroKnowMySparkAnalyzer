@@ -1,10 +1,10 @@
 use crate::analysis::{
-    arr_at, classify_frame, classify_hotspot, f64_at, i64_at, is_generic_frame,
+    arr_at, classify_frame, classify_hotspot, f64_at, i64_at, is_generic_frame, is_io_frame,
     is_server_thread_category, is_server_thread_name, obj_at, str_at,
 };
 use crate::Report;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 const MAX_DEPTH: usize = 64;
 const ANCHOR_LIMIT: usize = 40;
@@ -14,6 +14,11 @@ const BRANCH_WIDTH: usize = 16;
 const BRANCH_COVERAGE: f64 = 0.92;
 const MIN_CHILD_SHARE: f64 = 0.02;
 const BEAM_WIDTH: usize = 96;
+const MAX_ANCHOR_CANDIDATES: usize = 256;
+const MAX_DOMINANT_EXPANSIONS: usize = 20_000;
+const MAX_DESCENDANT_VISITS: usize = 100_000;
+const MAX_DESCENDANT_GROUPS: usize = 4_096;
+const MAX_CHILD_REFS_PER_NODE: usize = 4_096;
 
 #[derive(Clone)]
 struct Anchor<'a> {
@@ -63,6 +68,7 @@ fn root_refs(thread: &Value, nodes: &[Value]) -> Vec<usize> {
     let refs = arr_at(thread, "childrenRefs")
         .into_iter()
         .flatten()
+        .take(MAX_CHILD_REFS_PER_NODE)
         .filter_map(Value::as_u64)
         .filter_map(|value| usize::try_from(value).ok())
         .filter(|index| *index < nodes.len())
@@ -72,7 +78,12 @@ fn root_refs(thread: &Value, nodes: &[Value]) -> Vec<usize> {
     }
     let used = nodes
         .iter()
-        .flat_map(|node| arr_at(node, "childrenRefs").into_iter().flatten())
+        .flat_map(|node| {
+            arr_at(node, "childrenRefs")
+                .into_iter()
+                .flatten()
+                .take(MAX_CHILD_REFS_PER_NODE)
+        })
         .filter_map(Value::as_u64)
         .filter_map(|value| usize::try_from(value).ok())
         .filter(|index| *index < nodes.len())
@@ -129,7 +140,7 @@ fn category_matches(label: &str, category: &str) -> bool {
                 || lower.contains("commandentry")
                 || lower.contains(".commands.")
         }
-        "io" => lower.contains("filesystem") || lower.contains("file") || lower.contains("io."),
+        "io" => is_io_frame(&lower),
         _ => classify_frame(label) == category,
     }
 }
@@ -156,21 +167,35 @@ fn find_anchors<'a>(report: &'a Report, category: &str) -> Vec<Anchor<'a>> {
     ) {
         let Some(node) = nodes.get(index) else { return };
         *work += 1;
-        if depth > MAX_DEPTH || *work > 100_000 || out.len() >= 256 || !seen.insert(index) {
+        if depth > MAX_DEPTH || *work > 100_000 || !seen.insert(index) {
             return;
         }
         if category_matches(&stack_label(node), category) {
-            out.push(Anchor {
+            let candidate = Anchor {
                 thread,
                 index,
                 nodes,
                 thread_samples: samples,
-            });
+            };
+            if out.len() < MAX_ANCHOR_CANDIDATES {
+                out.push(candidate);
+            } else if let Some((smallest_index, smallest_samples)) = out
+                .iter()
+                .enumerate()
+                .map(|(position, anchor)| (position, sum_times(&anchor.nodes[anchor.index])))
+                .min_by(|left, right| left.1.total_cmp(&right.1))
+            {
+                let candidate_samples = sum_times(node);
+                if candidate_samples > smallest_samples {
+                    out[smallest_index] = candidate;
+                }
+            }
             return;
         }
         for child in arr_at(node, "childrenRefs")
             .into_iter()
             .flatten()
+            .take(MAX_CHILD_REFS_PER_NODE)
             .filter_map(Value::as_u64)
             .filter_map(|value| usize::try_from(value).ok())
         {
@@ -363,6 +388,7 @@ fn descendant_frames(
     category: &str,
     limit: usize,
 ) -> Vec<Value> {
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         report: &Report,
         anchor: &Anchor<'_>,
@@ -371,11 +397,13 @@ fn descendant_frames(
         category: &str,
         seen: &mut HashSet<usize>,
         groups: &mut HashMap<String, Value>,
+        work: &mut usize,
     ) {
         let Some(node) = anchor.nodes.get(index) else {
             return;
         };
-        if depth > MAX_DEPTH || !seen.insert(index) {
+        *work += 1;
+        if depth > MAX_DEPTH || *work > MAX_DESCENDANT_VISITS || !seen.insert(index) {
             return;
         }
         let label = stack_label(node);
@@ -394,7 +422,7 @@ fn descendant_frames(
                 .get(&key)
                 .and_then(|value| f64_at(value, "maxPercent"))
                 .is_none_or(|old| percent > old);
-            if replace {
+            if replace && (groups.contains_key(&key) || groups.len() < MAX_DESCENDANT_GROUPS) {
                 groups.insert(key, json!({
                     "label":label,"className":class,"methodName":method,
                     "sourceId":source_id,"sourceName":source_name,
@@ -407,14 +435,28 @@ fn descendant_frames(
         for child in arr_at(node, "childrenRefs")
             .into_iter()
             .flatten()
+            .take(MAX_CHILD_REFS_PER_NODE)
             .filter_map(Value::as_u64)
             .filter_map(|value| usize::try_from(value).ok())
         {
-            visit(report, anchor, child, depth + 1, category, seen, groups);
+            visit(
+                report,
+                anchor,
+                child,
+                depth + 1,
+                category,
+                seen,
+                groups,
+                work,
+            );
         }
     }
     let mut groups = HashMap::new();
+    let mut work = 0usize;
     for anchor in anchors {
+        if work >= MAX_DESCENDANT_VISITS {
+            break;
+        }
         visit(
             report,
             anchor,
@@ -423,6 +465,7 @@ fn descendant_frames(
             category,
             &mut HashSet::new(),
             &mut groups,
+            &mut work,
         );
     }
     let mut frames = groups.into_values().collect::<Vec<_>>();
@@ -508,6 +551,7 @@ fn call_chains(
         for child in arr_at(node, "childrenRefs")
             .into_iter()
             .flatten()
+            .take(MAX_CHILD_REFS_PER_NODE)
             .filter_map(Value::as_u64)
             .filter_map(|value| usize::try_from(value).ok())
         {
@@ -581,7 +625,10 @@ struct BranchCandidate {
 
 fn dominant_paths(report: &Report, anchors: &[Anchor<'_>], limit: usize) -> Vec<Value> {
     let mut paths = Vec::new();
-    for anchor in anchors.iter().take(ANCHOR_LIMIT) {
+    let selected_anchors = anchors.iter().take(ANCHOR_LIMIT).collect::<Vec<_>>();
+    let expansions_per_anchor = (MAX_DOMINANT_EXPANSIONS / selected_anchors.len().max(1)).max(1);
+    for anchor in selected_anchors {
+        let mut expansions = 0usize;
         let Some(start) = anchor.nodes.get(anchor.index) else {
             continue;
         };
@@ -592,17 +639,24 @@ fn dominant_paths(report: &Report, anchors: &[Anchor<'_>], limit: usize) -> Vec<
             seen: HashSet::from([anchor.index]),
         }];
         let mut completed = Vec::new();
-        for depth in 0..=MAX_DEPTH {
+        for depth in 0..MAX_DEPTH {
             let mut next = Vec::new();
             for candidate in std::mem::take(&mut frontier) {
+                if expansions >= expansions_per_anchor {
+                    completed.push(candidate);
+                    continue;
+                }
                 let Some(node) = anchor.nodes.get(candidate.index) else {
                     continue;
                 };
+                let mut unique_children = HashSet::new();
                 let mut children = arr_at(node, "childrenRefs")
                     .into_iter()
                     .flatten()
+                    .take(MAX_CHILD_REFS_PER_NODE)
                     .filter_map(Value::as_u64)
                     .filter_map(|index| usize::try_from(index).ok())
+                    .filter(|index| unique_children.insert(*index))
                     .filter(|index| {
                         !candidate.seen.contains(index) && anchor.nodes.get(*index).is_some()
                     })
@@ -640,6 +694,10 @@ fn dominant_paths(report: &Report, anchors: &[Anchor<'_>], limit: usize) -> Vec<
                     }).collect::<Vec<_>>()
                 });
                 for (index, _) in selected {
+                    if expansions >= expansions_per_anchor {
+                        break;
+                    }
+                    expansions += 1;
                     let mut child = candidate.clone();
                     child.index = index;
                     child.frames.push(flame_frame(
@@ -720,13 +778,74 @@ fn normalize(value: &str) -> String {
         .collect()
 }
 
-fn known_entities(report: &Report) -> Vec<String> {
-    let mut ids = BTreeSet::new();
+#[derive(Clone)]
+struct EntityInfo {
+    id: String,
+    namespace: String,
+}
+
+struct EntityIndex {
+    by_token: HashMap<String, Vec<EntityInfo>>,
+    truncated: bool,
+}
+
+struct EntityMatches<'a> {
+    entities: Vec<&'a EntityInfo>,
+    truncated: bool,
+}
+
+fn known_entities(report: &Report) -> EntityIndex {
+    const MAX_ENTITY_IDS: usize = 4_096;
+    const MAX_ENTITY_INDEX_BYTES: usize = 1024 * 1024;
+    const MAX_ENTITY_ID_BYTES: usize = 4_096;
+    const MAX_ENTITY_NAMESPACE_BYTES: usize = 512;
+    const MAX_ENTITY_PATH_BYTES: usize = 4_096;
+
+    let mut seen = HashSet::new();
+    let mut by_token: HashMap<String, Vec<EntityInfo>> = HashMap::new();
+    let mut indexed_bytes = 0usize;
+    let mut truncated = false;
+    let mut add_id = |id: &str| {
+        if seen.contains(id) {
+            return;
+        }
+        if seen.len() >= MAX_ENTITY_IDS {
+            truncated = true;
+            return;
+        }
+        let (namespace, path) = id.split_once(':').unwrap_or(("", id));
+        let token = normalize(path);
+        if token.len() < 3 {
+            return;
+        }
+        let normalized_namespace = normalize(namespace);
+        let added_bytes = id
+            .len()
+            .saturating_mul(2)
+            .saturating_add(token.len())
+            .saturating_add(normalized_namespace.len());
+        if id.len() > MAX_ENTITY_ID_BYTES
+            || namespace.len() > MAX_ENTITY_NAMESPACE_BYTES
+            || path.len() > MAX_ENTITY_PATH_BYTES
+            || indexed_bytes.saturating_add(added_bytes) > MAX_ENTITY_INDEX_BYTES
+        {
+            truncated = true;
+            return;
+        }
+        seen.insert(id.to_owned());
+        indexed_bytes += added_bytes;
+        by_token.entry(token).or_default().push(EntityInfo {
+            id: id.to_owned(),
+            namespace: normalized_namespace,
+        });
+    };
     if let Some(counts) = obj_at(
         &report.raw,
         "metadata.platformStatistics.world.entityCounts",
     ) {
-        ids.extend(counts.keys().cloned());
+        for id in counts.keys() {
+            add_id(id);
+        }
     }
     for world in arr_at(&report.raw, "metadata.platformStatistics.world.worlds")
         .into_iter()
@@ -735,16 +854,67 @@ fn known_entities(report: &Report) -> Vec<String> {
         for region in arr_at(world, "regions").into_iter().flatten() {
             for chunk in arr_at(region, "chunks").into_iter().flatten() {
                 if let Some(counts) = obj_at(chunk, "entityCounts") {
-                    ids.extend(counts.keys().cloned());
+                    for id in counts.keys() {
+                        add_id(id);
+                    }
                 }
             }
         }
     }
-    ids.into_iter().collect()
+    for entities in by_token.values_mut() {
+        entities.sort_by(|left, right| left.id.cmp(&right.id));
+    }
+    EntityIndex {
+        by_token,
+        truncated,
+    }
+}
+
+fn matching_entities<'a>(index: &'a EntityIndex, label: &str) -> EntityMatches<'a> {
+    let simple = class_from_label(label).rsplit('.').next().unwrap_or(label);
+    let mut end = simple.len().min(16 * 1024);
+    while !simple.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated_label = end < simple.len();
+    let normalized = normalize(&simple[..end]);
+    let mut candidate_tokens = vec![normalized.as_str()];
+    if let Some(token) = normalized.strip_suffix("entity") {
+        if token.len() >= 3 {
+            candidate_tokens.push(token);
+        }
+    }
+    if let Some(token) = normalized.strip_prefix("entity") {
+        if token.len() >= 3 {
+            candidate_tokens.push(token);
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut matches = Vec::new();
+    for token in candidate_tokens {
+        if let Some(entities) = index.by_token.get(token) {
+            for entity in entities {
+                if seen.insert(entity.id.as_str()) {
+                    matches.push(entity);
+                    if matches.len() >= 32 {
+                        return EntityMatches {
+                            entities: matches,
+                            truncated: true,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    EntityMatches {
+        entities: matches,
+        truncated: truncated_label,
+    }
 }
 
 fn attribution(report: &Report, categories: &[Value], limit: usize) -> Value {
     let entities = known_entities(report);
+    let mut entity_matching_truncated = entities.truncated;
     let mut by_source: HashMap<String, Value> = HashMap::new();
     let mut entity_candidates = Vec::new();
     for result in categories {
@@ -792,10 +962,10 @@ fn attribution(report: &Report, categories: &[Value], limit: usize) -> Value {
                 })
                 .and_then(Value::as_f64)
                 .unwrap_or_default();
-            let normalized_label = normalize(label);
-            let simple = normalize(class_from_label(label).rsplit('.').next().unwrap_or(""));
             let source_tokens = [normalize(id), normalize(name)];
-            let matched=entities.iter().filter_map(|entity|{let (namespace,path)=entity.split_once(':').unwrap_or(("",entity));let path_token=normalize(path);if path_token.len()<3{return None}let class_match=normalized_label.contains(&path_token)||normalized_label.contains(&format!("entity{path_token}"))||simple==path_token||simple==format!("entity{path_token}");let namespace_match=!namespace.is_empty()&&source_tokens.contains(&normalize(namespace));(class_match||namespace_match).then(||json!({"entityId":entity,"sourceId":id,"sourceName":name,"label":label,"category":category,"percent":percent,"confidence":if class_match&&namespace_match{"high"}else if class_match{"medium"}else{"low"},"reason":if class_match&&namespace_match{"terminal frame class matches entity id and source namespace"}else if class_match{"terminal frame class matches entity id"}else{"source namespace matches entity namespace, but frame class is not entity-specific"}}))}).collect::<Vec<_>>();
+            let entity_matches = matching_entities(&entities, label);
+            entity_matching_truncated |= entity_matches.truncated;
+            let matched=entity_matches.entities.into_iter().map(|entity|{let namespace_match=!entity.namespace.is_empty()&&source_tokens.contains(&entity.namespace);json!({"entityId":entity.id,"sourceId":id,"sourceName":name,"label":label,"category":category,"percent":percent,"confidence":if namespace_match{"high"}else{"medium"},"reason":if namespace_match{"terminal frame class matches entity id and source namespace"}else{"terminal frame class matches entity id"}})}).collect::<Vec<_>>();
             entity_candidates.extend(matched.clone());
             if id != "unknown" {
                 let entry=by_source.entry(id.into()).or_insert_with(||json!({"sourceId":id,"sourceName":name,"maxPercent":0.0,"categories":[],"terminalFrames":[],"matchedEntities":[]}));
@@ -843,13 +1013,14 @@ fn attribution(report: &Report, categories: &[Value], limit: usize) -> Value {
         ))
     });
     entity_candidates.truncate(limit);
-    let by_category=categories.iter().map(|result|{let category=result["category"].clone();let items=vec![result.clone()];let local=attribution_shallow(&items,&entities,limit);json!({"category":category,"topSources":local["topSources"],"entityCandidates":local["entityCandidates"],"callChains":result["callChains"],"dominantPaths":result["dominantPaths"]})}).collect::<Vec<_>>();
-    json!({"topSources":top,"entityCandidates":entity_candidates,"byCategory":by_category,"limits":{"maxDepth":MAX_DEPTH,"anchorLimit":ANCHOR_LIMIT,"callChainLimit":CALL_CHAIN_LIMIT,"branchWidth":BRANCH_WIDTH,"beamWidth":BEAM_WIDTH}})
+    let by_category=categories.iter().map(|result|{let category=result["category"].clone();let items=vec![result.clone()];let local=attribution_shallow(&items,&entities,limit);json!({"category":category,"topSources":local["topSources"],"entityCandidates":local["entityCandidates"],"entityMatchingTruncated":local["entityMatchingTruncated"],"callChains":result["callChains"],"dominantPaths":result["dominantPaths"]})}).collect::<Vec<_>>();
+    json!({"topSources":top,"entityCandidates":entity_candidates,"entityMatchingTruncated":entity_matching_truncated,"byCategory":by_category,"limits":{"maxDepth":MAX_DEPTH,"anchorLimit":ANCHOR_LIMIT,"callChainLimit":CALL_CHAIN_LIMIT,"branchWidth":BRANCH_WIDTH,"beamWidth":BEAM_WIDTH,"entityIds":4_096,"entityIndexBytes":1024*1024}})
 }
 
-fn attribution_shallow(categories: &[Value], entities: &[String], limit: usize) -> Value {
+fn attribution_shallow(categories: &[Value], entities: &EntityIndex, limit: usize) -> Value {
     let mut sources: HashMap<String, Value> = HashMap::new();
     let mut candidates = Vec::new();
+    let mut entity_matching_truncated = entities.truncated;
     for result in categories {
         let category = result["category"].as_str().unwrap_or("");
         for (item, chain) in result["callChains"]
@@ -903,12 +1074,10 @@ fn attribution_shallow(categories: &[Value], entities: &[String], limit: usize) 
                         .push(json!({"label":label,"percent":percent,"category":category}));
                 }
             }
-            let nl = normalize(label);
-            for entity in entities {
-                let path = entity.split_once(':').map_or(entity.as_str(), |(_, p)| p);
-                if normalize(path).len() >= 3 && nl.contains(&normalize(path)) {
-                    candidates.push(json!({"entityId":entity,"sourceId":id,"sourceName":name,"label":label,"category":category,"percent":percent,"confidence":"medium","reason":"terminal frame class matches entity id"}));
-                }
+            let entity_matches = matching_entities(entities, label);
+            entity_matching_truncated |= entity_matches.truncated;
+            for entity in entity_matches.entities {
+                candidates.push(json!({"entityId":entity.id,"sourceId":id,"sourceName":name,"label":label,"category":category,"percent":percent,"confidence":"medium","reason":"terminal frame class matches entity id"}));
             }
         }
     }
@@ -919,8 +1088,20 @@ fn attribution_shallow(categories: &[Value], entities: &[String], limit: usize) 
             .total_cmp(&f64_at(a, "maxPercent").unwrap_or_default())
     });
     top.truncate(limit);
+    candidates.sort_by(|a, b| {
+        f64_at(b, "percent")
+            .unwrap_or_default()
+            .total_cmp(&f64_at(a, "percent").unwrap_or_default())
+    });
+    let mut seen = HashSet::new();
+    candidates.retain(|item| {
+        seen.insert(format!(
+            "{}|{}|{}",
+            item["entityId"], item["sourceId"], item["label"]
+        ))
+    });
     candidates.truncate(limit);
-    json!({"topSources":top,"entityCandidates":candidates})
+    json!({"topSources":top,"entityCandidates":candidates,"entityMatchingTruncated":entity_matching_truncated})
 }
 
 fn specific(report: &Report, category: &str, limit: usize) -> Value {
@@ -1068,10 +1249,9 @@ mod tests {
             value.pointer("/attribution/byCategory/0/topSources/0/sourceId"),
             Some(&json!("create"))
         );
-        assert_eq!(
-            value.pointer("/attribution/entityCandidates/0/entityId"),
-            Some(&json!("create:contraption"))
-        );
+        assert!(value["attribution"]["entityCandidates"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
         assert!(value
             .pointer("/categories/0/dominantPaths/0/branchPoints/0/coveredShare")
             .and_then(Value::as_f64)
@@ -1131,5 +1311,30 @@ mod tests {
         let value = execute(&report, "block_entity", 64);
         assert!(value["anchors"].as_array().unwrap().is_empty());
         assert!(value["callChains"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_matching_uses_class_boundaries_not_substrings() {
+        let index = EntityIndex {
+            by_token: HashMap::from([(
+                "pig".to_string(),
+                vec![EntityInfo {
+                    id: "minecraft:pig".into(),
+                    namespace: "minecraft".into(),
+                }],
+            )]),
+            truncated: false,
+        };
+        assert!(
+            matching_entities(&index, "org.bukkit.craftbukkit.SpigotScheduler.run")
+                .entities
+                .is_empty()
+        );
+        assert_eq!(
+            matching_entities(&index, "net.minecraft.world.entity.animal.PigEntity.tick").entities
+                [0]
+            .id,
+            "minecraft:pig"
+        );
     }
 }

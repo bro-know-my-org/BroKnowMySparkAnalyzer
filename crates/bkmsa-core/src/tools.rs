@@ -100,11 +100,61 @@ pub fn report_tool_descriptions() -> Vec<ToolDescription> {
     ]
 }
 
+const MAX_TOOL_ITEMS: u64 = 64;
+const MAX_RAW_ITEMS: u64 = 128;
+
 fn limit(args: &Value, default: usize) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)
-        .map(|n| n.clamp(1, 1000) as usize)
+        .map(|n| n.clamp(1, MAX_TOOL_ITEMS) as usize)
         .unwrap_or(default)
+}
+
+fn validate_tool_args(tool: &str, args: &Value) -> Result<(), SparkError> {
+    let object = args.as_object().ok_or_else(|| {
+        SparkError::InvalidArgument("tool arguments must be a JSON object".into())
+    })?;
+    let allowed: &[&str] = match tool {
+        "hotspots" | "hotspot_groups" | "mod_sources" | "time_windows" | "worst_windows"
+        | "entity_chunks" | "heap" | "evidence_links" => &["limit"],
+        "hot_paths" => &["category", "limit"],
+        "raw_field" => &["path", "maxItems"],
+        "report_inventory"
+        | "overview"
+        | "environment"
+        | "entities"
+        | "memory_gc"
+        | "diagnostic_hypotheses"
+        | "evidence_gaps" => &[],
+        _ => return Err(SparkError::UnknownTool(tool.into())),
+    };
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(SparkError::InvalidArgument(format!(
+            "unsupported argument '{key}' for tool '{tool}'"
+        )));
+    }
+    if object
+        .get("limit")
+        .is_some_and(|value| value.as_u64().is_none_or(|number| number == 0))
+    {
+        return Err(SparkError::InvalidArgument(
+            "limit must be a positive integer".into(),
+        ));
+    }
+    if object
+        .get("maxItems")
+        .is_some_and(|value| value.as_u64().is_none_or(|number| number == 0))
+    {
+        return Err(SparkError::InvalidArgument(
+            "maxItems must be a positive integer".into(),
+        ));
+    }
+    if object.contains_key("category") && object.get("category").and_then(Value::as_str).is_none() {
+        return Err(SparkError::InvalidArgument(
+            "category must be a string".into(),
+        ));
+    }
+    Ok(())
 }
 pub fn execute_tool_request(
     report: &Report,
@@ -113,11 +163,7 @@ pub fn execute_tool_request(
     execute_tool(report, &request.tool, request.args)
 }
 pub fn execute_tool(report: &Report, tool: &str, args: Value) -> Result<ToolResult, SparkError> {
-    if !args.is_object() {
-        return Err(SparkError::InvalidArgument(
-            "tool arguments must be a JSON object".into(),
-        ));
-    }
+    validate_tool_args(tool, &args)?;
     if tool == "raw_field"
         && args
             .get("path")
@@ -158,7 +204,10 @@ pub fn execute_tool(report: &Report, tool: &str, args: Value) -> Result<ToolResu
         "raw_field" => raw_field(
             report,
             args.get("path").and_then(Value::as_str).unwrap_or(""),
-            args.get("maxItems").and_then(Value::as_u64).unwrap_or(80) as usize,
+            args.get("maxItems")
+                .and_then(Value::as_u64)
+                .unwrap_or(80)
+                .clamp(1, MAX_RAW_ITEMS) as usize,
         ),
         _ => return Err(SparkError::UnknownTool(tool.into())),
     })
@@ -400,23 +449,105 @@ fn evidence_gaps(r: &Report) -> Value {
         ],
     })
 }
-fn trim(v: &Value, max: usize) -> Value {
+struct TrimBudget {
+    nodes: usize,
+    bytes: usize,
+    truncated: bool,
+}
+
+fn bounded_string(value: &str, budget: &mut TrimBudget) -> String {
+    if value.len() <= budget.bytes {
+        budget.bytes -= value.len();
+        return value.to_owned();
+    }
+    budget.truncated = true;
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > budget.bytes {
+            break;
+        }
+        end = next;
+    }
+    budget.bytes = budget.bytes.saturating_sub(end);
+    value[..end].to_owned()
+}
+
+fn trim(v: &Value, max_width: usize, depth: usize, budget: &mut TrimBudget) -> Option<Value> {
+    if budget.nodes == 0 || budget.bytes == 0 {
+        budget.truncated = true;
+        return None;
+    }
+    budget.nodes -= 1;
+    if depth >= 16 {
+        budget.truncated = true;
+        return Some(Value::String("<depth limit reached>".into()));
+    }
     match v {
-        Value::Array(a) => Value::Array(a.iter().take(max).map(|x| trim(x, max)).collect()),
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .take(max)
-                .map(|(k, v)| (k.clone(), trim(v, max)))
-                .collect(),
-        ),
-        _ => v.clone(),
+        Value::Array(items) => {
+            budget.truncated |= items.len() > max_width;
+            Some(Value::Array(
+                items
+                    .iter()
+                    .take(max_width)
+                    .filter_map(|item| trim(item, max_width, depth + 1, budget))
+                    .collect(),
+            ))
+        }
+        Value::Object(object) => {
+            budget.truncated |= object.len() > max_width;
+            Some(Value::Object(
+                object
+                    .iter()
+                    .take(max_width)
+                    .filter_map(|(key, value)| {
+                        let key = bounded_string(key, budget);
+                        trim(value, max_width, depth + 1, budget).map(|value| (key, value))
+                    })
+                    .collect(),
+            ))
+        }
+        Value::String(value) => Some(Value::String(bounded_string(value, budget))),
+        other => {
+            let size = other.to_string().len();
+            if size > budget.bytes {
+                budget.truncated = true;
+                None
+            } else {
+                budget.bytes -= size;
+                Some(other.clone())
+            }
+        }
     }
 }
 fn raw_field(r: &Report, p: &str, max: usize) -> Value {
     if p.is_empty() {
         return json!({"error":"path is required"});
     }
-    path(&r.raw, p).map(|v| trim(v, max)).unwrap_or(Value::Null)
+    let Some(source) = path(&r.raw, p) else {
+        return Value::Null;
+    };
+    let mut byte_budget = 48 * 1024;
+    loop {
+        let mut budget = TrimBudget {
+            nodes: max.saturating_mul(8).min(1_024),
+            bytes: byte_budget,
+            truncated: false,
+        };
+        let value = trim(source, max, 0, &mut budget).unwrap_or(Value::Null);
+        let output = if budget.truncated {
+            json!({"truncated":true,"value":value})
+        } else {
+            value
+        };
+        if serde_json::to_vec(&output).is_ok_and(|serialized| serialized.len() <= 64 * 1024) {
+            return output;
+        }
+        if byte_budget <= 512 {
+            return json!({"truncated":true,"value":"<serialized size limit reached>"});
+        }
+        byte_budget /= 2;
+    }
 }
 
 #[cfg(test)]
@@ -496,5 +627,39 @@ mod tests {
         assert!(gaps["missingEvidence"].is_array());
         assert!(gaps["recommendedNextCaptures"].is_array());
         assert!(gaps["cannotProveAlone"].is_array());
+    }
+
+    #[test]
+    fn validates_and_clamps_tool_arguments() {
+        let r = parse_text_report("hello", "stdin").unwrap();
+        assert!(matches!(
+            execute_tool(&r, "overview", json!({"limit": 1})),
+            Err(SparkError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            execute_tool(&r, "hot_paths", json!({"category": 1})),
+            Err(SparkError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            execute_tool(&r, "hotspots", json!({"limit": 0})),
+            Err(SparkError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            execute_tool(&r, "hotspots", json!({"limit": 10_000})).unwrap()["limit"],
+            MAX_TOOL_ITEMS
+        );
+    }
+
+    #[test]
+    fn raw_field_marks_byte_budget_truncation() {
+        let r = Report {
+            kind: ReportKind::Sampler,
+            source: "x".into(),
+            raw: json!({"large":"\u{0000}".repeat(128 * 1024)}),
+            summary: ReportSummary::default(),
+        };
+        let value = execute_tool(&r, "raw_field", json!({"path":"large","maxItems":1})).unwrap();
+        assert_eq!(value["truncated"], true);
+        assert!(serde_json::to_vec(&value).unwrap().len() <= 64 * 1024);
     }
 }
