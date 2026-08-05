@@ -51,10 +51,15 @@ pub async fn emit(text: &str, output: Option<&Path>) -> Result<(), CliError> {
             .await
             .map_err(|error| CliError::Output(format!("{}: {error}", path.display())))
     } else {
-        tokio::io::stdout()
+        let mut stdout = tokio::io::stdout();
+        stdout
             .write_all(text.as_bytes())
             .await
-            .map_err(|error| CliError::Output(format!("stdout: {error}")))
+            .map_err(|error| CliError::Output(format!("stdout: {error}")))?;
+        stdout
+            .flush()
+            .await
+            .map_err(|error| CliError::Output(format!("stdout flush: {error}")))
     }
 }
 
