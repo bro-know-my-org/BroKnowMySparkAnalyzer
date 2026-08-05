@@ -90,8 +90,8 @@ pub struct AgentOptions {
 impl Default for AgentOptions {
     fn default() -> Self {
         Self {
-            max_rounds: 12,
-            validation_round_limit: 10,
+            max_rounds: 16,
+            validation_round_limit: 3,
             max_tool_result_chars: 18_000,
         }
     }

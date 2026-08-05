@@ -81,6 +81,12 @@ impl AiConfig {
         self.temperature
     }
 
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Result<Self> {
+        self.api_key = api_key.into();
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
@@ -191,6 +197,14 @@ impl AiConfig {
     pub(crate) fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
     }
+
+    #[cfg(feature = "native-client")]
+    pub(crate) fn uses_loopback_endpoint(&self) -> bool {
+        Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(is_loopback_host))
+            .unwrap_or(false)
+    }
 }
 
 fn optional_env(name: &'static str, default: &str) -> Result<String> {
@@ -234,7 +248,9 @@ fn validate_base_url(value: &str) -> Result<()> {
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    host.parse::<std::net::IpAddr>()
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
         .is_ok_and(|address| address.is_loopback())
 }
 

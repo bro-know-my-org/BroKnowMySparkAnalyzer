@@ -34,10 +34,13 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     pub fn new(config: AiConfig) -> Result<Self> {
         config.validate()?;
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .timeout(config.timeout())
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        if config.uses_loopback_endpoint() {
+            builder = builder.no_proxy();
+        }
+        let http = builder.build()?;
         Ok(Self { config, http })
     }
 
