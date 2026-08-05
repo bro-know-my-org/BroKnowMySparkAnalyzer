@@ -65,7 +65,7 @@
     }
   },
   "dependencies": {
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.13",
     "html-to-image": "^1.11.13",
     "marked": "^16.4.1"
   },
