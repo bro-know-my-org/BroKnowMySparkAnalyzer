@@ -13,6 +13,7 @@ const MAX_PROTOBUF_FIELDS: usize = 250_000;
 enum WireSchema {
     SamplerRoot,
     SamplerMetadata,
+    ThreadDumper,
     ThreadNode,
     StackTraceNode,
     HealthRoot,
@@ -42,6 +43,12 @@ enum WireSchema {
     Leaf,
 }
 
+#[derive(Clone, Copy)]
+enum PackedKind {
+    Varint,
+    Fixed64,
+}
+
 impl WireSchema {
     fn nested(self, field: u64) -> Option<Self> {
         match self {
@@ -54,7 +61,8 @@ impl WireSchema {
                 _ => None,
             },
             Self::SamplerMetadata => match field {
-                1 | 4 | 5 => Some(Self::Leaf),
+                1 | 5 => Some(Self::Leaf),
+                4 => Some(Self::ThreadDumper),
                 7 => Some(Self::PlatformMetadata),
                 8 => Some(Self::PlatformStatistics),
                 9 => Some(Self::SystemStatistics),
@@ -125,9 +133,71 @@ impl WireSchema {
             Self::GcMap => (field == 2).then_some(Self::Leaf),
             Self::WindowMap => (field == 2).then_some(Self::Leaf),
             Self::NetMap => (field == 2).then_some(Self::NetInterface),
-            Self::StackTraceNode | Self::PlatformMetadata | Self::ScalarMap | Self::Leaf => None,
+            Self::ThreadDumper
+            | Self::StackTraceNode
+            | Self::PlatformMetadata
+            | Self::ScalarMap
+            | Self::Leaf => None,
         }
     }
+
+    fn packed(self, field: u64) -> Option<PackedKind> {
+        match self {
+            Self::SamplerRoot if field == 6 => Some(PackedKind::Varint),
+            Self::ThreadDumper if field == 2 => Some(PackedKind::Varint),
+            Self::ThreadNode => match field {
+                4 => Some(PackedKind::Fixed64),
+                5 => Some(PackedKind::Varint),
+                _ => None,
+            },
+            Self::StackTraceNode => match field {
+                8 => Some(PackedKind::Fixed64),
+                9 => Some(PackedKind::Varint),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+fn bump_fields(fields: &mut usize, count: usize) -> Result<(), SparkError> {
+    *fields = fields.saturating_add(count);
+    if *fields > MAX_PROTOBUF_FIELDS {
+        return Err(SparkError::Decode(format!(
+            "protobuf report exceeds the {MAX_PROTOBUF_FIELDS} field limit"
+        )));
+    }
+    Ok(())
+}
+
+fn count_packed_values(
+    bytes: &[u8],
+    kind: PackedKind,
+    fields: &mut usize,
+) -> Result<bool, SparkError> {
+    match kind {
+        PackedKind::Fixed64 => {
+            if !bytes.len().is_multiple_of(8) {
+                return Ok(false);
+            }
+            bump_fields(fields, (bytes.len() / 8).saturating_sub(1))?;
+        }
+        PackedKind::Varint => {
+            let mut cursor = 0usize;
+            let mut first = true;
+            while cursor < bytes.len() {
+                if read_varint(bytes, &mut cursor).is_err() {
+                    return Ok(false);
+                }
+                if first {
+                    first = false;
+                } else {
+                    bump_fields(fields, 1)?;
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, SparkError> {
@@ -155,12 +225,7 @@ fn scan_protobuf_message(
 ) -> Result<bool, SparkError> {
     let mut cursor = 0usize;
     while cursor < bytes.len() {
-        *fields += 1;
-        if *fields > MAX_PROTOBUF_FIELDS {
-            return Err(SparkError::Decode(format!(
-                "protobuf report exceeds the {MAX_PROTOBUF_FIELDS} field limit"
-            )));
-        }
+        bump_fields(fields, 1)?;
         let Ok(tag) = read_varint(bytes, &mut cursor) else {
             return Ok(false);
         };
@@ -199,6 +264,10 @@ fn scan_protobuf_message(
                 };
                 if let Some(nested_schema) = schema.nested(field) {
                     if !scan_protobuf_message(&bytes[cursor..end], nested_schema, fields)? {
+                        return Ok(false);
+                    }
+                } else if let Some(packed_kind) = schema.packed(field) {
+                    if !count_packed_values(&bytes[cursor..end], packed_kind, fields)? {
                         return Ok(false);
                     }
                 }
@@ -516,7 +585,10 @@ mod tests {
     fn rejects_excessive_top_level_field_count_before_decoding() {
         let bytes = [0x08, 0x00].repeat(MAX_PROTOBUF_FIELDS + 1);
         let error = parse_report_bytes(&bytes, "hostile", "").unwrap_err();
-        assert!(error.to_string().contains("field limit"));
+        assert!(
+            error.to_string().contains("field limit"),
+            "unexpected error: {error}"
+        );
     }
     #[test]
     fn rejects_excessive_nested_field_count_before_decoding() {
@@ -526,6 +598,53 @@ mod tests {
         bytes.extend(nested);
         let error = parse_report_bytes(&bytes, "hostile", "").unwrap_err();
         assert!(error.to_string().contains("field limit"));
+    }
+    #[test]
+    fn rejects_excessive_packed_varint_elements_before_decoding() {
+        let packed = vec![0; MAX_PROTOBUF_FIELDS + 1];
+        let mut bytes = vec![0x32];
+        prost::encoding::encode_varint(packed.len() as u64, &mut bytes);
+        bytes.extend(packed);
+        let error = validate_protobuf_wire_budget(&bytes, WireSchema::SamplerRoot).unwrap_err();
+        assert!(error.to_string().contains("field limit"));
+    }
+    #[test]
+    fn accepts_exact_packed_varint_element_limit() {
+        let packed = vec![0; MAX_PROTOBUF_FIELDS];
+        let mut bytes = vec![0x32];
+        prost::encoding::encode_varint(packed.len() as u64, &mut bytes);
+        bytes.extend(packed);
+        validate_protobuf_wire_budget(&bytes, WireSchema::SamplerRoot).unwrap();
+    }
+    #[test]
+    fn rejects_excessive_thread_dumper_ids_before_decoding() {
+        let packed = vec![0; MAX_PROTOBUF_FIELDS + 1];
+        let mut thread_dumper = vec![0x12];
+        prost::encoding::encode_varint(packed.len() as u64, &mut thread_dumper);
+        thread_dumper.extend(packed);
+        let mut metadata = vec![0x22];
+        prost::encoding::encode_varint(thread_dumper.len() as u64, &mut metadata);
+        metadata.extend(thread_dumper);
+        let mut bytes = vec![0x0a];
+        prost::encoding::encode_varint(metadata.len() as u64, &mut bytes);
+        bytes.extend(metadata);
+        let error = validate_protobuf_wire_budget(&bytes, WireSchema::SamplerRoot).unwrap_err();
+        assert!(error.to_string().contains("field limit"));
+    }
+    #[test]
+    fn rejects_excessive_packed_fixed64_elements_before_decoding() {
+        let packed = vec![0; (MAX_PROTOBUF_FIELDS + 1) * 8];
+        let mut thread = vec![0x22];
+        prost::encoding::encode_varint(packed.len() as u64, &mut thread);
+        thread.extend(packed);
+        let mut bytes = vec![0x12];
+        prost::encoding::encode_varint(thread.len() as u64, &mut bytes);
+        bytes.extend(thread);
+        let error = validate_protobuf_wire_budget(&bytes, WireSchema::SamplerRoot).unwrap_err();
+        assert!(
+            error.to_string().contains("field limit"),
+            "unexpected error: {error}"
+        );
     }
     #[test]
     fn does_not_treat_opaque_string_bytes_as_nested_messages() {

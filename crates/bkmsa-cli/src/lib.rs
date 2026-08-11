@@ -78,7 +78,7 @@ fn looks_like_text(bytes: &[u8]) -> bool {
         .iter()
         .filter(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\r' | b'\t' | 0x1b))
         .count();
-    suspicious <= 4.max(bytes.len() / 100)
+    suspicious == 0 || (bytes.len() >= 8 && suspicious <= (bytes.len() / 100).max(1))
 }
 
 async fn run_tool(args: ToolArgs) -> Result<(), CliError> {
@@ -203,5 +203,7 @@ mod tests {
     fn text_detection_accepts_ansi_logs_and_rejects_binary_nul() {
         assert!(looks_like_text(b"\x1b[31mCan't keep up!\x1b[0m\n"));
         assert!(!looks_like_text(b"spark\0protobuf"));
+        assert!(!looks_like_text(b"\x08{"));
+        assert!(looks_like_text(b"warning\x07: bell\n"));
     }
 }

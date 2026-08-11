@@ -19,6 +19,7 @@ const MAX_DOMINANT_EXPANSIONS: usize = 20_000;
 const MAX_DESCENDANT_VISITS: usize = 100_000;
 const MAX_DESCENDANT_GROUPS: usize = 4_096;
 const MAX_CHILD_REFS_PER_NODE: usize = 4_096;
+const MAX_CHILD_REF_ENTRIES_SCANNED: usize = 16_384;
 
 #[derive(Clone)]
 struct Anchor<'a> {
@@ -26,6 +27,7 @@ struct Anchor<'a> {
     index: usize,
     nodes: &'a [Value],
     thread_samples: f64,
+    samples: f64,
 }
 
 fn sum_times(node: &Value) -> f64 {
@@ -64,29 +66,50 @@ fn method_from_label(label: &str) -> &str {
         .map_or(no_line, |(_, method)| method)
 }
 
-fn root_refs(thread: &Value, nodes: &[Value]) -> Vec<usize> {
-    let refs = arr_at(thread, "childrenRefs")
+fn child_refs<'a>(
+    value: &'a Value,
+    field: &'a str,
+    nodes_len: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    const INLINE_UNIQUE_REFS: usize = 8;
+    let mut inline = [0usize; INLINE_UNIQUE_REFS];
+    let mut inline_len = 0usize;
+    let mut unique = None::<HashSet<usize>>;
+    arr_at(value, field)
         .into_iter()
         .flatten()
-        .take(MAX_CHILD_REFS_PER_NODE)
+        .take(MAX_CHILD_REF_ENTRIES_SCANNED)
         .filter_map(Value::as_u64)
         .filter_map(|value| usize::try_from(value).ok())
-        .filter(|index| *index < nodes.len())
-        .collect::<Vec<_>>();
+        .filter(move |index| {
+            if *index >= nodes_len {
+                return false;
+            }
+            if let Some(seen) = unique.as_mut() {
+                return seen.insert(*index);
+            }
+            if inline[..inline_len].contains(index) {
+                return false;
+            }
+            if inline_len < INLINE_UNIQUE_REFS {
+                inline[inline_len] = *index;
+                inline_len += 1;
+                return true;
+            }
+            unique = Some(inline.into_iter().chain([*index]).collect());
+            true
+        })
+        .take(MAX_CHILD_REFS_PER_NODE)
+}
+
+fn root_refs(thread: &Value, nodes: &[Value]) -> Vec<usize> {
+    let refs = child_refs(thread, "childrenRefs", nodes.len()).collect::<Vec<_>>();
     if !refs.is_empty() {
         return refs;
     }
     let used = nodes
         .iter()
-        .flat_map(|node| {
-            arr_at(node, "childrenRefs")
-                .into_iter()
-                .flatten()
-                .take(MAX_CHILD_REFS_PER_NODE)
-        })
-        .filter_map(Value::as_u64)
-        .filter_map(|value| usize::try_from(value).ok())
-        .filter(|index| *index < nodes.len())
+        .flat_map(|node| child_refs(node, "childrenRefs", nodes.len()))
         .collect::<HashSet<_>>();
     let roots = (0..nodes.len())
         .filter(|index| !used.contains(index))
@@ -171,34 +194,29 @@ fn find_anchors<'a>(report: &'a Report, category: &str) -> Vec<Anchor<'a>> {
             return;
         }
         if category_matches(&stack_label(node), category) {
+            let candidate_samples = sum_times(node);
             let candidate = Anchor {
                 thread,
                 index,
                 nodes,
                 thread_samples: samples,
+                samples: candidate_samples,
             };
             if out.len() < MAX_ANCHOR_CANDIDATES {
                 out.push(candidate);
             } else if let Some((smallest_index, smallest_samples)) = out
                 .iter()
                 .enumerate()
-                .map(|(position, anchor)| (position, sum_times(&anchor.nodes[anchor.index])))
+                .map(|(position, anchor)| (position, anchor.samples))
                 .min_by(|left, right| left.1.total_cmp(&right.1))
             {
-                let candidate_samples = sum_times(node);
                 if candidate_samples > smallest_samples {
                     out[smallest_index] = candidate;
                 }
             }
             return;
         }
-        for child in arr_at(node, "childrenRefs")
-            .into_iter()
-            .flatten()
-            .take(MAX_CHILD_REFS_PER_NODE)
-            .filter_map(Value::as_u64)
-            .filter_map(|value| usize::try_from(value).ok())
-        {
+        for child in child_refs(node, "childrenRefs", nodes.len()) {
             visit(
                 nodes,
                 child,
@@ -432,13 +450,7 @@ fn descendant_frames(
                 }));
             }
         }
-        for child in arr_at(node, "childrenRefs")
-            .into_iter()
-            .flatten()
-            .take(MAX_CHILD_REFS_PER_NODE)
-            .filter_map(Value::as_u64)
-            .filter_map(|value| usize::try_from(value).ok())
-        {
+        for child in child_refs(node, "childrenRefs", anchor.nodes.len()) {
             visit(
                 report,
                 anchor,
@@ -548,13 +560,7 @@ fn call_chains(
                 "samples":samples,"thread":anchor.thread,"path":path_json,
             }));
         }
-        for child in arr_at(node, "childrenRefs")
-            .into_iter()
-            .flatten()
-            .take(MAX_CHILD_REFS_PER_NODE)
-            .filter_map(Value::as_u64)
-            .filter_map(|value| usize::try_from(value).ok())
-        {
+        for child in child_refs(node, "childrenRefs", anchor.nodes.len()) {
             visit(
                 report,
                 anchor,
@@ -649,17 +655,8 @@ fn dominant_paths(report: &Report, anchors: &[Anchor<'_>], limit: usize) -> Vec<
                 let Some(node) = anchor.nodes.get(candidate.index) else {
                     continue;
                 };
-                let mut unique_children = HashSet::new();
-                let mut children = arr_at(node, "childrenRefs")
-                    .into_iter()
-                    .flatten()
-                    .take(MAX_CHILD_REFS_PER_NODE)
-                    .filter_map(Value::as_u64)
-                    .filter_map(|index| usize::try_from(index).ok())
-                    .filter(|index| unique_children.insert(*index))
-                    .filter(|index| {
-                        !candidate.seen.contains(index) && anchor.nodes.get(*index).is_some()
-                    })
+                let mut children = child_refs(node, "childrenRefs", anchor.nodes.len())
+                    .filter(|index| !candidate.seen.contains(index))
                     .map(|index| (index, sum_times(&anchor.nodes[index])))
                     .collect::<Vec<_>>();
                 children.sort_by(|left, right| right.1.total_cmp(&left.1));
@@ -1262,6 +1259,24 @@ mod tests {
                 .and_then(Value::as_str),
             Some("create")
         );
+    }
+
+    #[test]
+    fn child_reference_limit_applies_after_validation_and_deduplication() {
+        let nodes = vec![json!({}), json!({}), json!({})];
+        let mut refs = vec![json!(usize::MAX); MAX_CHILD_REFS_PER_NODE];
+        refs.extend([json!(1), json!(1), json!(2)]);
+        let thread = json!({"childrenRefs":refs});
+        assert_eq!(root_refs(&thread, &nodes), vec![1, 2]);
+    }
+
+    #[test]
+    fn child_reference_scan_has_a_separate_raw_entry_budget() {
+        let mut refs = vec![json!(usize::MAX); MAX_CHILD_REF_ENTRIES_SCANNED];
+        refs.push(json!(1));
+        assert!(child_refs(&json!({"childrenRefs":refs}), "childrenRefs", 2)
+            .next()
+            .is_none());
     }
 
     #[test]

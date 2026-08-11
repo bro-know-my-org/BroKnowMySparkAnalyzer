@@ -525,7 +525,7 @@ fn raw_field(r: &Report, p: &str, max: usize) -> Value {
         return json!({"error":"path is required"});
     }
     let Some(source) = path(&r.raw, p) else {
-        return Value::Null;
+        return json!({"truncated":false,"value":Value::Null});
     };
     let mut byte_budget = 48 * 1024;
     loop {
@@ -535,11 +535,7 @@ fn raw_field(r: &Report, p: &str, max: usize) -> Value {
             truncated: false,
         };
         let value = trim(source, max, 0, &mut budget).unwrap_or(Value::Null);
-        let output = if budget.truncated {
-            json!({"truncated":true,"value":value})
-        } else {
-            value
-        };
+        let output = json!({"truncated":budget.truncated,"value":value});
         if serde_json::to_vec(&output).is_ok_and(|serialized| serialized.len() <= 64 * 1024) {
             return output;
         }
@@ -661,5 +657,21 @@ mod tests {
         let value = execute_tool(&r, "raw_field", json!({"path":"large","maxItems":1})).unwrap();
         assert_eq!(value["truncated"], true);
         assert!(serde_json::to_vec(&value).unwrap().len() <= 64 * 1024);
+    }
+
+    #[test]
+    fn raw_field_always_returns_a_stable_envelope() {
+        let r = Report {
+            kind: ReportKind::Sampler,
+            source: "x".into(),
+            raw: json!({"small":[1,2,3]}),
+            summary: ReportSummary::default(),
+        };
+        let value = execute_tool(&r, "raw_field", json!({"path":"small","maxItems":8})).unwrap();
+        assert_eq!(value, json!({"truncated":false,"value":[1,2,3]}));
+        assert_eq!(
+            execute_tool(&r, "raw_field", json!({"path":"missing","maxItems":8})).unwrap(),
+            json!({"truncated":false,"value":Value::Null})
+        );
     }
 }

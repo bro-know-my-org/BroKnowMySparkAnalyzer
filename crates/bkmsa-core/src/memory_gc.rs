@@ -44,6 +44,16 @@ fn signal(category: &str, severity: &str, title: String, detail: String) -> Valu
     json!({"category":category,"severity":severity,"title":title,"detail":detail})
 }
 
+fn usage_ratio(summary: &Value) -> Option<(f64, &'static str, &str)> {
+    f64_at(summary, "usedMaxRatio").map(|ratio| {
+        (
+            ratio,
+            "max",
+            summary["maxFormatted"].as_str().unwrap_or("-"),
+        )
+    })
+}
+
 fn heap_signals(heap: Option<&Value>) -> Vec<Value> {
     let summary = usage_summary(heap);
     let Some(used_max) = f64_at(&summary, "usedMaxRatio") else {
@@ -73,17 +83,19 @@ fn heap_signals(heap: Option<&Value>) -> Vec<Value> {
 
 fn non_heap_signals(non_heap: Option<&Value>) -> Vec<Value> {
     let summary = usage_summary(non_heap);
-    let ratio = f64_at(&summary, "usedMaxRatio").unwrap_or_default();
+    let Some((ratio, denominator, total)) = usage_ratio(&summary) else {
+        return Vec::new();
+    };
     if ratio >= 0.9 {
         vec![signal(
             "memory",
             if ratio >= 0.97 { "critical" } else { "warning" },
             "非堆内存接近上限".into(),
             format!(
-                "non-heap used/max {}% ({} / {})",
+                "non-heap used/{denominator} {}% ({} / {})",
                 format_number(ratio * 100.0),
                 summary["usedFormatted"].as_str().unwrap_or("-"),
-                summary["maxFormatted"].as_str().unwrap_or("-")
+                total
             ),
         )]
     } else {
@@ -97,33 +109,31 @@ fn pool_signals(name: &str, usage: Option<&Value>, collection: Option<&Value>) -
     let lower = name.to_lowercase();
     let old = lower.contains("old") || lower.contains("tenured");
     let mut signals = vec![];
-    let used_max = f64_at(&current, "usedMaxRatio").unwrap_or_default();
-    if old && used_max >= 0.8 {
+    let current_ratio = usage_ratio(&current);
+    if old && current_ratio.is_some_and(|(ratio, _, _)| ratio >= 0.8) {
+        let (ratio, denominator, total) = current_ratio.expect("checked above");
         signals.push(signal(
             "memory",
-            if used_max >= 0.92 {
-                "critical"
-            } else {
-                "warning"
-            },
+            if ratio >= 0.92 { "critical" } else { "warning" },
             format!("{name} 使用率偏高"),
             format!(
-                "used/max {}% ({} / {})",
-                format_number(used_max * 100.0),
+                "used/{denominator} {}% ({} / {})",
+                format_number(ratio * 100.0),
                 current["usedFormatted"].as_str().unwrap_or("-"),
-                current["maxFormatted"].as_str().unwrap_or("-")
+                total
             ),
         ));
     }
-    let collection_ratio = f64_at(&collected, "usedMaxRatio").unwrap_or_default();
-    if old && collection_ratio >= 0.85 {
+    let collection_ratio = usage_ratio(&collected);
+    if old && collection_ratio.is_some_and(|(ratio, _, _)| ratio >= 0.85) {
+        let (ratio, denominator, _) = collection_ratio.expect("checked above");
         signals.push(signal(
             "memory",
             "warning",
             format!("{name} collection usage 偏高"),
             format!(
-                "collection used/max {}%",
-                format_number(collection_ratio * 100.0)
+                "collection used/{denominator} {}%",
+                format_number(ratio * 100.0)
             ),
         ));
     }
@@ -360,5 +370,20 @@ mod tests {
         assert!(finding_signals(&r.raw)
             .iter()
             .any(|v| v.title.contains("长暂停")));
+    }
+
+    #[test]
+    fn committed_usage_without_a_hard_max_does_not_emit_pressure() {
+        let r = report(json!({"metadata":{"platformStatistics":{"memory":{
+            "heap":{"used":10,"committed":100,"max":100},
+            "nonHeap":{"used":95,"committed":100,"max":0},
+            "pools":[{"name":"G1 Old Gen","usage":{"used":93,"committed":100,"max":-1},"collectionUsage":{"used":85,"committed":100,"max":-1}}]
+        }}}}));
+        let result = summarize_memory_gc(&r);
+        let signals = result["signals"].as_array().unwrap();
+        assert!(signals.is_empty());
+        assert_eq!(result["nonHeap"]["usedCommittedRatio"], 0.95);
+        assert_eq!(result["pools"][0]["usage"]["usedCommittedRatio"], 0.93);
+        assert!(result["nonHeap"]["usedMaxRatio"].is_null());
     }
 }

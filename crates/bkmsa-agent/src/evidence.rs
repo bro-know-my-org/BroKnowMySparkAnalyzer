@@ -321,8 +321,9 @@ fn overstates_gc(content: &str) -> bool {
     content
         .split(['。', '！', '？', '\n', '；', ';', '，', ','])
         .any(|clause| {
-            contains_any(clause, &["GC", "G1 Old", "Old Generation"])
-                && contains_any(
+            let lower = clause.to_ascii_lowercase();
+            contains_any(&lower, &["gc", "g1 old", "old generation"])
+                && (contains_any(
                     clause,
                     &[
                         "加剧尖峰",
@@ -335,31 +336,128 @@ fn overstates_gc(content: &str) -> bool {
                         "是 tick 尖峰的主因",
                         "引发了卡顿",
                         "引发卡顿",
-                        "root cause",
-                        "caused the spike",
                     ],
-                )
+                ) || contains_any(&lower, &["root cause", "caused the spike"]))
                 && !has_matching_gc_causation_negation(clause)
         })
 }
 
 fn has_matching_gc_causation_negation(clause: &str) -> bool {
-    let causal = [
+    let lower = clause.to_ascii_lowercase();
+    let mut causals = [
         "加剧尖峰",
         "导致尖峰",
         "造成尖峰",
         "解释尖峰",
         "导致 tick",
         "造成 tick",
+        "是本次 tick 尖峰的主因",
+        "是 tick 尖峰的主因",
+        "引发了卡顿",
+        "引发卡顿",
     ]
     .iter()
-    .filter_map(|needle| clause.find(needle))
-    .min();
-    let negation = ["不能证明", "无法证明", "未证明", "不能说明", "不代表"]
-        .iter()
-        .filter_map(|needle| clause.find(needle))
-        .min();
-    matches!((negation, causal), (Some(negation), Some(causal)) if negation <= causal)
+    .flat_map(|needle| clause.match_indices(needle).map(|(index, _)| index))
+    .chain(
+        ["root cause", "caused the spike"]
+            .iter()
+            .flat_map(|needle| find_all_ascii_phrases(&lower, needle)),
+    )
+    .collect::<Vec<_>>();
+    causals.sort_unstable();
+    let negations = [
+        "不能证明",
+        "无法证明",
+        "未证明",
+        "不能说明",
+        "不代表",
+        "不是",
+        "并非",
+        "并未",
+        "没有",
+        "未导致",
+        "未造成",
+        "未加剧",
+        "未解释",
+        "未引发",
+    ]
+    .iter()
+    .flat_map(|needle| clause.match_indices(needle).map(|(index, _)| index))
+    .chain(
+        ["not", "isn't", "is not", "didn't", "did not"]
+            .iter()
+            .flat_map(|needle| find_all_ascii_phrases(&lower, needle)),
+    )
+    .collect::<Vec<_>>();
+    let mut negations = negations;
+    negations.sort_unstable();
+    !causals.is_empty()
+        && causals.iter().all(|causal| {
+            let Some(negation) = negations
+                .iter()
+                .copied()
+                .filter(|negation| negation <= causal)
+                .max()
+            else {
+                return false;
+            };
+            let exception_start = negations
+                .iter()
+                .copied()
+                .filter(|candidate| candidate < &negation)
+                .max()
+                .unwrap_or(negation);
+            let exception_scope = &clause[exception_start..*causal];
+            let exception_scope_lower = exception_scope.to_ascii_lowercase();
+            if contains_any(
+                &exception_scope_lower,
+                &["not only", "not the only", "not not"],
+            ) || contains_any(
+                exception_scope,
+                &[
+                    "并非没有",
+                    "不是没有",
+                    "不能不",
+                    "并非不能",
+                    "不是唯一",
+                    "并非唯一",
+                ],
+            ) {
+                return false;
+            }
+            let between = &clause[negation..*causal];
+            let between_lower = between.to_ascii_lowercase();
+            !between.contains([':', '：', '—', '(', ')', '（', '）'])
+                && !["but", "and", "however", "yet", "therefore", "while"]
+                    .iter()
+                    .any(|boundary| !find_all_ascii_phrases(&between_lower, boundary).is_empty())
+                && !contains_any(
+                    between,
+                    &[
+                        "但", "却", "不过", "然而", "并且", "且", "而", "反而", "因此", "同时",
+                    ],
+                )
+                && !causals
+                    .iter()
+                    .any(|other| *other > negation && *other < *causal)
+        })
+}
+
+fn find_all_ascii_phrases(content: &str, phrase: &str) -> Vec<usize> {
+    content
+        .match_indices(phrase)
+        .filter_map(|(index, _)| {
+            let before = content[..index].chars().next_back();
+            let after = content[index + phrase.len()..].chars().next();
+            let is_ascii_word =
+                |character: char| character.is_ascii_alphanumeric() || character == '_';
+            let starts_with_word = phrase.chars().next().is_some_and(is_ascii_word);
+            let ends_with_word = phrase.chars().next_back().is_some_and(is_ascii_word);
+            ((!starts_with_word || before.is_none_or(|char| !is_ascii_word(char)))
+                && (!ends_with_word || after.is_none_or(|char| !is_ascii_word(char))))
+            .then_some(index)
+        })
+        .collect()
 }
 
 fn omits_selected_category(content: &str, state: &EvidenceState) -> bool {
@@ -397,6 +495,24 @@ fn omits_major_category(content: &str, state: &EvidenceState) -> bool {
     {
         return true;
     }
+    if conclusion.contains("分别") {
+        let percentages = extract_percentages(conclusion);
+        if percentages.len() >= required.len()
+            && required
+                .iter()
+                .enumerate()
+                .all(|(required_index, (state_index, _))| {
+                    state
+                        .major_hotspot_percentages
+                        .get(*state_index)
+                        .is_some_and(|expected| {
+                            (percentages[required_index] - *expected).abs() <= 0.6
+                        })
+                })
+        {
+            return false;
+        }
+    }
     required.into_iter().any(|(index, category)| {
         state
             .major_hotspot_percentages
@@ -410,10 +526,31 @@ fn omits_major_category(content: &str, state: &EvidenceState) -> bool {
 }
 
 fn category_span<'a>(content: &'a str, category: &str) -> Option<&'a str> {
-    let (start, alias_len) = category_aliases(category)?
+    let occurrences = category_aliases(category)?
         .iter()
-        .filter_map(|alias| content.find(alias).map(|start| (start, alias.len())))
-        .min_by_key(|(start, _)| *start)?;
+        .flat_map(|alias| {
+            alias_positions(content, alias)
+                .into_iter()
+                .map(move |start| (start, alias.len()))
+        })
+        .collect::<Vec<_>>();
+    let (start, end) = occurrences
+        .iter()
+        .filter_map(|(start, alias_len)| {
+            let bounds = category_span_bounds(content, *start, *alias_len);
+            mentions_any_percent(&content[bounds.0..bounds.1]).then_some(bounds)
+        })
+        .min_by_key(|(start, _)| *start)
+        .or_else(|| {
+            occurrences
+                .iter()
+                .min_by_key(|(start, _)| *start)
+                .map(|(start, alias_len)| category_span_bounds(content, *start, *alias_len))
+        })?;
+    Some(&content[start..end])
+}
+
+fn category_span_bounds(content: &str, start: usize, alias_len: usize) -> (usize, usize) {
     let delimiters = ['，', ',', '、', '；', ';', '。', '\n'];
     let clause_start = delimiters
         .iter()
@@ -430,22 +567,98 @@ fn category_span<'a>(content: &'a str, category: &str) -> Option<&'a str> {
         .filter_map(|delimiter| tail.find(*delimiter))
         .min()
         .map_or(content.len(), |end| start + alias_len + end);
-    Some(&content[clause_start..clause_end])
+    let current_end = start + alias_len;
+    let category_bounds = [
+        "block_entity",
+        "chunk_task",
+        "entity_tick",
+        "world_tick",
+        "commands",
+        "entity_ai_pathfinding",
+        "io",
+    ]
+    .iter()
+    .filter_map(|known| category_aliases(known))
+    .flatten()
+    .flat_map(|alias| {
+        alias_positions(content, alias)
+            .into_iter()
+            .map(move |index| (index, alias.len()))
+    })
+    .filter(|(index, len)| *index != start || *len != alias_len)
+    .filter(|(index, len)| {
+        let between = if *index + *len <= start {
+            &content[index + len..start]
+        } else if *index >= current_end {
+            &content[current_end..*index]
+        } else {
+            return false;
+        };
+        contains_any(
+            between,
+            &["与", "和", "及", "以及", "、", "/", " and ", " but "],
+        ) && between.contains('%')
+    })
+    .collect::<Vec<_>>();
+    let category_start = category_bounds
+        .iter()
+        .filter_map(|(index, len)| {
+            if *index + *len <= start {
+                let after_alias = index + len;
+                Some(after_alias + last_category_connector_end(&content[after_alias..start]))
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(clause_start);
+    let category_end = category_bounds
+        .iter()
+        .filter_map(|(index, _)| (*index >= current_end).then_some(*index))
+        .min()
+        .unwrap_or(content.len());
+    (
+        clause_start.max(category_start),
+        clause_end.min(category_end),
+    )
+}
+
+fn last_category_connector_end(content: &str) -> usize {
+    ["与", "和", "及", "以及", "、", "/", " and ", " but "]
+        .iter()
+        .flat_map(|connector| {
+            content
+                .match_indices(connector)
+                .map(move |(index, _)| index + connector.len())
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn mentions_any_percent(content: &str) -> bool {
+    content.contains('%')
 }
 
 fn mentions_percent(content: &str, expected: f64) -> bool {
-    content.match_indices('%').any(|(percent_index, _)| {
-        let prefix = content[..percent_index].trim_end();
-        let start = prefix
-            .char_indices()
-            .rev()
-            .take_while(|(_, char)| char.is_ascii_digit() || *char == '.')
-            .last()
-            .map_or(prefix.len(), |(index, _)| index);
-        prefix[start..]
-            .parse::<f64>()
-            .is_ok_and(|actual| (actual - expected).abs() <= 0.6)
-    })
+    extract_percentages(content)
+        .first()
+        .is_some_and(|actual| (*actual - expected).abs() <= 0.6)
+}
+
+fn extract_percentages(content: &str) -> Vec<f64> {
+    content
+        .match_indices('%')
+        .filter_map(|(percent_index, _)| {
+            let prefix = content[..percent_index].trim_end();
+            let start = prefix
+                .char_indices()
+                .rev()
+                .take_while(|(_, char)| char.is_ascii_digit() || *char == '.')
+                .last()
+                .map_or(prefix.len(), |(index, _)| index);
+            prefix[start..].parse::<f64>().ok()
+        })
+        .collect()
 }
 
 fn conclusion_lead(content: &str) -> &str {
@@ -504,14 +717,47 @@ fn is_priority_category(category: &str) -> bool {
 }
 
 fn mentions_category(content: &str, category: &str) -> bool {
-    category_aliases(category).is_some_and(|aliases| contains_any(content, aliases))
+    category_aliases(category).is_some_and(|aliases| {
+        aliases
+            .iter()
+            .any(|alias| !alias_positions(content, alias).is_empty())
+    })
 }
 
 fn category_position(content: &str, category: &str) -> Option<usize> {
-    category_aliases(category)?
+    let occurrences = category_aliases(category)?
         .iter()
-        .filter_map(|alias| content.find(alias))
+        .flat_map(|alias| {
+            alias_positions(content, alias)
+                .into_iter()
+                .map(move |start| (start, alias.len()))
+        })
+        .collect::<Vec<_>>();
+    occurrences
+        .iter()
+        .filter_map(|(start, alias_len)| {
+            let (span_start, span_end) = category_span_bounds(content, *start, *alias_len);
+            mentions_any_percent(&content[span_start..span_end]).then_some(*start)
+        })
         .min()
+        .or_else(|| occurrences.iter().map(|(start, _)| *start).min())
+}
+
+fn alias_positions(content: &str, alias: &str) -> Vec<usize> {
+    content
+        .match_indices(alias)
+        .filter_map(|(index, _)| {
+            if !alias.is_ascii() {
+                return Some(index);
+            }
+            let before = content[..index].chars().next_back();
+            let after = content[index + alias.len()..].chars().next();
+            let is_word = |character: char| character.is_ascii_alphanumeric() || character == '_';
+            (before.is_none_or(|character| !is_word(character))
+                && after.is_none_or(|character| !is_word(character)))
+            .then_some(index)
+        })
+        .collect()
 }
 
 fn category_aliases(category: &str) -> Option<&'static [&'static str]> {
@@ -531,7 +777,7 @@ fn category_aliases(category: &str) -> Option<&'static [&'static str]> {
         ],
         "entity_tick" => &["entity_tick", "实体 tick", "实体tick", "EntityTickList"],
         "world_tick" => &["world_tick", "世界 tick", "world tick", "ServerLevel"],
-        "commands" => &["commands", "命令", "function", "CommandFunction"],
+        "commands" => &["commands", "命令", "CommandFunction"],
         "entity_ai_pathfinding" => &[
             "entity_ai_pathfinding",
             "实体 AI",
@@ -706,8 +952,66 @@ mod tests {
             Some(FinalProblem::OmitsMajorCategory)
         );
         assert_eq!(
+            validate_final("# 结论\n实体 tick 18.2% 与区块任务 42.4%", &state),
+            Some(FinalProblem::OmitsMajorCategory)
+        );
+        assert_eq!(
+            validate_final("# 结论\n实体 tick 42.4% 与区块任务 18.2%", &state),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体 tick function 占 42.4%，区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\nentity_tick mycommandsEnabled 42.4%，区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体 tick（命令相关）占 42.4%，区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体 tick 和命令相关部分占 42.4%，区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n区块任务与实体 tick 相关；实体 tick 42.4%，区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final("# 结论\n实体 tick 42.4% 和 18.2% 与区块任务 99%", &state),
+            Some(FinalProblem::OmitsMajorCategory)
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体 tick 当前 42.4%（此前 30%），区块任务 18.2%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
             validate_final("# 结论\n实体 tick、区块任务分别为 18.2% 和 42.4%", &state),
             Some(FinalProblem::OmitsMajorCategory)
+        );
+        assert_eq!(
+            validate_final("# 结论\n实体 tick 与区块任务分别为 42.4% 和 18.2%", &state),
+            None
         );
     }
 
@@ -819,6 +1123,141 @@ mod tests {
         assert_eq!(
             validate_final("不能证明 GC 导致尖峰", &EvidenceState::default()),
             None
+        );
+        assert_eq!(
+            validate_final("GC 不是本次 tick 尖峰的主因", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC 并未引发卡顿", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC is not the root cause", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC is NOT the root cause", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC is the ROOT CAUSE", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC CAUSED THE SPIKE", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC is not only the root cause", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC 并非没有导致尖峰", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("gc is the root cause", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC is not not the root cause", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC is not the only root cause", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC 不是唯一导致尖峰的原因", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not only infrequent but is not the root cause",
+                &EvidenceState::default()
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final("GC 未导致尖峰", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC并非root cause", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final("GC has a notable root cause", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent but caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not the root cause but caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent and caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent—but caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent (but caused the spike)",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC 没有增加但导致尖峰", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC 没有增加而导致尖峰", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent yet caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC is not frequent: it caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final(
+                "GC did not increase while it caused the spike",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("GC 没有增加同时导致尖峰", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
         );
     }
 

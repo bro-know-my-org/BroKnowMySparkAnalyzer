@@ -127,7 +127,10 @@ fn scalar(value: &Value) -> String {
 fn escape_terminal(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     for character in value.chars() {
-        if character.is_control() || is_bidi_control(character) {
+        if character.is_control()
+            || matches!(character, '\u{2028}' | '\u{2029}')
+            || is_bidi_control(character)
+        {
             for escaped in character.escape_default() {
                 output.push(escaped);
             }
@@ -158,4 +161,61 @@ fn markdown_heading(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn terminal_rendering_escapes_controls_and_bidi_characters() {
+        let value = json!({"key\u{202e}":"line\n\u{061c}\u{2069}"});
+        let rendered = render_value(OutputFormat::Terminal, "ignored", &value).unwrap();
+        assert!(rendered.contains("\\u{202e}"));
+        assert!(rendered.contains("\\n"));
+        assert!(rendered.contains("\\u{61c}"));
+        assert!(rendered.contains("\\u{2069}"));
+        assert!(!rendered.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn terminal_rendering_handles_empty_collections_and_depth_boundary() {
+        assert_eq!(
+            render_value(OutputFormat::Terminal, "ignored", &json!({"a":[],"b":{}})).unwrap(),
+            "a:\n  []\nb:\n  {}\n"
+        );
+        let mut value = json!("leaf");
+        for _ in 0..65 {
+            value = json!([value]);
+        }
+        let rendered = render_value(OutputFormat::Terminal, "ignored", &value).unwrap();
+        assert!(rendered.contains("<depth limit reached>"));
+    }
+
+    #[test]
+    fn bidi_boundaries_do_not_escape_adjacent_characters() {
+        assert_eq!(
+            escape_terminal("a\u{202a}b\u{202e}c"),
+            "a\\u{202a}b\\u{202e}c"
+        );
+        assert_eq!(
+            escape_terminal("\u{2028}\u{2029}\u{202f}"),
+            "\\u{2028}\\u{2029}\u{202f}"
+        );
+        assert_eq!(
+            escape_terminal("\u{2065}\u{2066}\u{2069}\u{206a}"),
+            "\u{2065}\\u{2066}\\u{2069}\u{206a}"
+        );
+        for control in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
+        ] {
+            assert!(escape_terminal(&control.to_string()).starts_with("\\u{"));
+        }
+        for ordinary in [
+            '\u{061b}', '\u{061d}', '\u{200d}', '\u{2010}', '\u{202f}', '\u{2065}', '\u{206a}',
+        ] {
+            assert_eq!(escape_terminal(&ordinary.to_string()), ordinary.to_string());
+        }
+    }
 }

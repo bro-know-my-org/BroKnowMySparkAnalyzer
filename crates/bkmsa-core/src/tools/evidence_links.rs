@@ -391,7 +391,7 @@ pub(super) fn evidence_links(report: &Report, limit: usize) -> Value {
                 source["maxPercent"].as_f64().unwrap_or_default() >= 1.0,
                 mod_source.is_some(),
                 !category_evidence.is_empty(),
-                !matched_entities.is_empty(),
+                false,
             ]),
             "categories": categories,
             "evidenceSources":evidence_sources(["hot_paths",if mod_source.is_some(){"mod_sources"}else{""},if !category_evidence.is_empty(){"hotspot_groups"}else{""}]),
