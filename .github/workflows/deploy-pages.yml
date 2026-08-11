@@ -1,10 +1,10 @@
 name: Deploy Web to GitHub Pages
 
 on:
+  workflow_call:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -53,14 +53,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Rust WebAssembly core
-        run: pnpm run build:wasm
+      - name: Build and smoke-test Web site
+        run: pnpm run build:site
 
-      - name: Smoke-test Rust WebAssembly core
-        run: pnpm run test:wasm
-
-      - name: Build Web
-        run: pnpm run build:web
+      - name: Verify deployable WebAssembly assets
+        shell: bash
+        run: |
+          test -f dist/bkmsa-wasm/bkmsa_wasm.js
+          test -f dist/bkmsa-wasm/bkmsa_wasm_bg.wasm
 
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5

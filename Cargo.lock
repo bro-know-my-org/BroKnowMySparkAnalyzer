@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "bkmsa-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bkmsa-core",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "bkmsa-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "bkmsa-agent",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "bkmsa-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "prost",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "bkmsa-tauri"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bkmsa-agent",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "bkmsa-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bkmsa-agent",

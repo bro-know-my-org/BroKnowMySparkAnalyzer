@@ -1,7 +1,7 @@
 {
   "name": "bro-know-my-spark-analyzer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.0.9",
@@ -11,6 +11,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "build:web": "vue-tsc --noEmit && vite build",
     "build:wasm": "wasm-pack build crates/bkmsa-wasm --mode no-install --target web --release --out-dir ../../public/bkmsa-wasm --out-name bkmsa_wasm",
+    "build:site": "pnpm run build:wasm && pnpm run test:wasm && pnpm run build:web",
     "test:wasm": "node scripts/wasm-smoke.mjs",
     "check:rust": "cargo check --workspace --all-targets && cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
     "test:rust": "cargo test --workspace --all-targets && cargo test --manifest-path src-tauri/Cargo.toml --all-targets",

@@ -1,16 +1,16 @@
 name: Publish SDK Packages
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-  workflow_dispatch:
+  workflow_call:
     inputs:
       version:
-        description: "Package version, for example 0.1.0"
         required: true
         type: string
-
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: true
+      NPM_TOKEN:
+        required: true
 permissions:
   contents: read
   id-token: write
@@ -24,6 +24,8 @@ jobs:
     name: Publish Rust crates
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     permissions:
       contents: read
 
@@ -35,17 +37,21 @@ jobs:
         id: version
         shell: bash
         env:
-          DISPATCH_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            VERSION="${DISPATCH_VERSION}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          VERSION="${VERSION#v}"
-          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          VERSION="${RELEASE_VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
             echo "Version must look like 1.2.3 or 1.2.3-beta.1, got ${VERSION}" >&2
             exit 1
+          fi
+          if [[ "${VERSION}" == *-* ]]; then
+            IFS='.' read -ra IDENTIFIERS <<< "${VERSION#*-}"
+            for identifier in "${IDENTIFIERS[@]}"; do
+              if [[ "${identifier}" =~ ^[0-9]+$ && "${identifier}" == 0* && "${identifier}" != "0" ]]; then
+                echo "Numeric prerelease identifiers must not contain leading zeroes: ${identifier}" >&2
+                exit 1
+              fi
+            done
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
@@ -64,7 +70,7 @@ jobs:
           EXPECTED_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
-          ACTUAL_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "bkmsa-core") | .version')"
+          ACTUAL_VERSION="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "bkmsa-core") | .version')"
           if [[ "${ACTUAL_VERSION}" != "${EXPECTED_VERSION}" ]]; then
             echo "Tag/input version ${EXPECTED_VERSION} does not match workspace version ${ACTUAL_VERSION}" >&2
             exit 1
@@ -125,24 +131,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Resolve version
-        id: version
-        shell: bash
-        env:
-          DISPATCH_VERSION: ${{ inputs.version }}
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            VERSION="${DISPATCH_VERSION}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          VERSION="${VERSION#v}"
-          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Version must look like 1.2.3 or 1.2.3-beta.1, got ${VERSION}" >&2
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-
       - name: Set up pnpm
         uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
@@ -158,18 +146,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Sync package version from tag
+      - name: Verify package version
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          EXPECTED_VERSION: ${{ needs.publish-crates.outputs.version }}
         run: |
-          node - <<'NODE'
-          const fs = require("fs");
-          const path = "packages/spark-analyzer/package.json";
-          const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
-          pkg.version = process.env.VERSION;
-          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
-          NODE
+          ACTUAL_VERSION="$(node -p 'require("./packages/spark-analyzer/package.json").version')"
+          test "${ACTUAL_VERSION}" = "${EXPECTED_VERSION}" || {
+            echo "Package version ${ACTUAL_VERSION} does not match ${EXPECTED_VERSION}" >&2
+            exit 1
+          }
 
       - name: Build package
         run: pnpm --dir packages/spark-analyzer run build
@@ -181,7 +167,7 @@ jobs:
         working-directory: packages/spark-analyzer
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.publish-crates.outputs.version }}
         run: |
           if npm view "@bro-know-my/spark-analyzer@${RELEASE_VERSION}" version >/dev/null 2>&1; then
             echo "npm package ${RELEASE_VERSION} is already published; skipping"

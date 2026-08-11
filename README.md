@@ -212,7 +212,7 @@ pnpm --dir packages/spark-analyzer build
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.0"
+bkmsa-tauri = "0.1.1"
 ```
 
 ```rust
@@ -246,7 +246,7 @@ NPM_TOKEN             npm 发布 token
 
 首次 `cargo publish` 会自动创建 crate，不需要在 crates.io 手动建包。首次发布后可以把 token 收紧到这四个 crate，或迁移到 crates.io Trusted Publishing。crate 版本不可覆盖；workflow 支持安全重跑并跳过已经存在的同版本包。
 
-推送 `v*` tag（或手动触发 Release workflow）会为 Windows、Linux 和 macOS 构建桌面包及原生 CLI。版本 `0.1.1` 的预期资产示例：
+推送到 `master` 会在 WASM smoke test 和 Web 构建成功后更新 GitHub Pages。推送严格的 `vX.Y.Z` tag（或手动触发 Release workflow）会先校验已提交版本并运行完整 CI，再构建 Windows、Linux 和 macOS 桌面包及原生 CLI；随后发布 Rust/npm SDK、部署网页并创建 GitHub Release。版本 `0.1.1` 的预期资产示例：
 
 ```text
 bkmsa-0.1.1-windows-x64.exe
@@ -476,7 +476,7 @@ To embed the analyzer in another Tauri 2 application:
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.0"
+bkmsa-tauri = "0.1.1"
 ```
 
 ```rust
@@ -510,7 +510,7 @@ NPM_TOKEN             npm publishing token
 
 The first `cargo publish` creates each crate automatically; no manual crates.io package creation is needed. After bootstrapping, restrict the token to these four crates or migrate to crates.io Trusted Publishing. Published versions cannot be overwritten. The workflow is rerunnable and skips matching versions that already exist.
 
-Pushing a `v*` tag (or manually dispatching the Release workflow) builds desktop packages and native CLIs for Windows, Linux, and macOS. Expected assets for version `0.1.1` include:
+Pushing to `master` updates GitHub Pages after the WASM smoke test and Web build succeed. Pushing a strict `vX.Y.Z` tag (or manually dispatching the Release workflow) first validates committed versions and runs the full CI gate, then builds desktop packages and native CLIs for Windows, Linux, and macOS. Rust/npm SDK publication, Web deployment, and the GitHub Release follow only after those gates pass. Expected assets for version `0.1.1` include:
 
 ```text
 bkmsa-0.1.1-windows-x64.exe
