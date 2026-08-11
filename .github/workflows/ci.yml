@@ -125,13 +125,3 @@ jobs:
 
       - name: Check Tauri shell
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
-
-  deploy-web:
-    name: Deploy Web after CI
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [verify, cross-platform-check]
-    uses: ./.github/workflows/deploy-pages.yml
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
