@@ -1,8 +1,8 @@
 use base64::Engine;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use serde::Deserialize;
-use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use tauri::{
     plugin::{Builder, TauriPlugin},
     Manager, Runtime,
@@ -18,6 +18,7 @@ const MAX_REPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXPORT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SAVE_DIALOG_OPTIONS_BYTES: usize = 16 * 1024;
 const STORED_API_KEY_HANDLE: &str = "__BKMSA_STORED_API_KEY__";
+static CREDENTIAL_OPERATION_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
 #[derive(Debug)]
 struct RemoteReport {
@@ -102,6 +103,41 @@ struct StoredAiCredential {
     base_url: String,
 }
 
+struct AnalysisCleanup<'a> {
+    state: &'a AnalyzerState,
+    report_id: String,
+    analysis_id: u64,
+    active: bool,
+}
+
+impl<'a> AnalysisCleanup<'a> {
+    fn new(state: &'a AnalyzerState, report_id: String, analysis_id: u64) -> Self {
+        Self {
+            state,
+            report_id,
+            analysis_id,
+            active: true,
+        }
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        self.state
+            .finish_analysis(&self.report_id, self.analysis_id)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for AnalysisCleanup<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self
+                .state
+                .finish_analysis(&self.report_id, self.analysis_id);
+        }
+    }
+}
+
 fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new("io.github.broknowmyorg.broknowmysparkanalyzer", account)
         .map_err(|error| format!("无法打开系统凭据存储: {error}"))
@@ -115,23 +151,43 @@ fn legacy_api_key_entry() -> Result<keyring::Entry, String> {
     credential_entry("bkmsa-api-key")
 }
 
-fn store_credential(api_key: &str, base_url: &str) -> Result<(), String> {
+fn credential_operation_lock() -> Arc<tokio::sync::Mutex<()>> {
+    CREDENTIAL_OPERATION_LOCK
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn run_credential_operation<T, F>(failure: &str, operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let guard = credential_operation_lock().lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        operation()
+    })
+    .await
+    .map_err(|error| format!("{failure}: {error}"))?
+}
+
+fn store_credential_locked(api_key: &str, base_url: &str) -> Result<(), String> {
     let credential = serde_json::json!({
         "api_key": api_key,
         "base_url": base_url,
     })
     .to_string();
-    api_key_entry()?
+    let entry = api_key_entry()?;
+    entry
         .set_password(&credential)
         .map_err(|error| format!("保存 AI 凭据到系统凭据存储失败: {error}"))?;
-    match legacy_api_key_entry()?.delete_credential() {
+    legacy_api_key_entry().and_then(|legacy| match legacy.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!("清理旧版 API Key 失败: {error}")),
-    }
+    })
 }
 
-#[tauri::command]
-fn analyzer_store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
+fn store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
     if request.api_key.trim().is_empty() {
         return Err("API Key 不能为空".to_string());
     }
@@ -153,11 +209,18 @@ fn analyzer_store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
         0.0,
     )
     .map_err(|error| error.to_string())?;
-    store_credential(validated.api_key(), validated.base_url())
+    store_credential_locked(validated.api_key(), validated.base_url())
 }
 
 #[tauri::command]
-fn analyzer_load_api_key(base_url: Option<String>) -> Result<Option<String>, String> {
+async fn analyzer_store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
+    run_credential_operation("保存 AI 凭据任务失败", move || {
+        store_api_key(request)
+    })
+    .await
+}
+
+fn load_api_key(base_url: Option<String>) -> Result<Option<String>, String> {
     let entry = api_key_entry()?;
     match entry.get_password() {
         Ok(record) => match serde_json::from_str::<StoredAiCredential>(&record) {
@@ -172,12 +235,28 @@ fn analyzer_load_api_key(base_url: Option<String>) -> Result<Option<String>, Str
             }
             _ => Ok(None),
         },
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring::Error::NoEntry) => match legacy_api_key_entry()?.get_password() {
+            Ok(api_key) if !api_key.trim().is_empty() => Err(
+                "检测到旧版 API Key；请重新输入并保存，以将其绑定到当前 API 服务地址".to_string(),
+            ),
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(format!("读取旧版 API Key 失败: {error}")),
+        },
         Err(error) => Err(format!("读取系统凭据存储失败: {error}")),
     }
 }
 
-fn resolve_ai_config(config: bkmsa_agent::AiConfig) -> Result<bkmsa_agent::AiConfig, String> {
+#[tauri::command]
+async fn analyzer_load_api_key(base_url: Option<String>) -> Result<Option<String>, String> {
+    run_credential_operation("读取 AI 凭据任务失败", move || {
+        load_api_key(base_url)
+    })
+    .await
+}
+
+fn resolve_ai_config_blocking(
+    config: bkmsa_agent::AiConfig,
+) -> Result<bkmsa_agent::AiConfig, String> {
     if config.api_key() != STORED_API_KEY_HANDLE {
         return Ok(config);
     }
@@ -194,15 +273,33 @@ fn resolve_ai_config(config: bkmsa_agent::AiConfig) -> Result<bkmsa_agent::AiCon
         .map_err(|error| error.to_string())
 }
 
+async fn resolve_ai_config(config: bkmsa_agent::AiConfig) -> Result<bkmsa_agent::AiConfig, String> {
+    run_credential_operation("读取 AI 凭据任务失败", move || {
+        resolve_ai_config_blocking(config)
+    })
+    .await
+}
+
 #[tauri::command]
-fn analyzer_delete_api_key() -> Result<(), String> {
-    for entry in [api_key_entry()?, legacy_api_key_entry()?] {
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(format!("删除系统凭据失败: {error}")),
+async fn analyzer_delete_api_key() -> Result<(), String> {
+    run_credential_operation("删除 AI 凭据任务失败", || {
+        let mut errors = Vec::new();
+        for entry in [api_key_entry(), legacy_api_key_entry()] {
+            match entry {
+                Ok(entry) => match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => {}
+                    Err(error) => errors.push(error.to_string()),
+                },
+                Err(error) => errors.push(error),
+            }
         }
-    }
-    Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("删除系统凭据失败: {}", errors.join("；")))
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -285,9 +382,10 @@ async fn analyzer_run_analysis(
     state: tauri::State<'_, AnalyzerState>,
 ) -> Result<bkmsa_agent::AgentResult, String> {
     let report = state.get(&request.report_id)?;
-    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config)?)
+    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config).await?)
         .map_err(|error| error.to_string())?;
     let (analysis_id, cancellation) = state.begin_analysis(&request.report_id)?;
+    let cleanup = AnalysisCleanup::new(&state, request.report_id.clone(), analysis_id);
     let result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err("分析已中止".to_string()),
@@ -295,7 +393,7 @@ async fn analyzer_run_analysis(
             result.map_err(|error| error.to_string())
         }
     };
-    state.finish_analysis(&request.report_id, analysis_id)?;
+    cleanup.finish()?;
     result
 }
 
@@ -315,9 +413,10 @@ async fn analyzer_ask_follow_up(
     use bkmsa_agent::ToolExecutor;
 
     let report = state.get(&request.report_id)?;
-    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config)?)
+    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config).await?)
         .map_err(|error| error.to_string())?;
     let (analysis_id, cancellation) = state.begin_analysis(&request.report_id)?;
+    let cleanup = AnalysisCleanup::new(&state, request.report_id.clone(), analysis_id);
     let context = report.context();
     let result = tokio::select! {
         biased;
@@ -331,13 +430,13 @@ async fn analyzer_ask_follow_up(
             &request.question,
         ) => result.map_err(|error| error.to_string()),
     };
-    state.finish_analysis(&request.report_id, analysis_id)?;
+    cleanup.finish()?;
     result
 }
 
 #[tauri::command]
 async fn analyzer_test_ai_connection(config: bkmsa_agent::AiConfig) -> Result<String, String> {
-    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config)?)
+    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config).await?)
         .map_err(|error| error.to_string())?;
     client
         .test_connection()
@@ -350,7 +449,7 @@ async fn analyzer_test_ai_connection(config: bkmsa_agent::AiConfig) -> Result<St
 async fn analyzer_list_ai_models(
     config: bkmsa_agent::AiConfig,
 ) -> Result<Vec<bkmsa_agent::ModelInfo>, String> {
-    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config)?)
+    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config).await?)
         .map_err(|error| error.to_string())?;
     client
         .list_models()
@@ -418,7 +517,7 @@ async fn fetch_remote_report(input: &str) -> Result<RemoteReport, String> {
 }
 
 #[tauri::command]
-fn save_export_file<R: Runtime>(
+async fn save_export_file<R: Runtime>(
     request: SaveExportRequest,
     app: tauri::AppHandle<R>,
 ) -> Result<Option<String>, String> {
@@ -441,26 +540,35 @@ fn save_export_file<R: Runtime>(
         .and_then(|value| value.to_str())
         .unwrap_or("bkmsa-export.md")
         .to_string();
-    let mut dialog = app.dialog().file().set_file_name(file_name);
-    for filter in options.filters.into_iter().take(8) {
-        let extensions = filter
-            .extensions
-            .iter()
-            .take(16)
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        dialog = dialog.add_filter(
-            filter.name.chars().take(80).collect::<String>(),
-            &extensions,
-        );
-    }
-    let Some(path) = dialog.blocking_save_file() else {
+    let dialog_path = tokio::task::spawn_blocking(move || {
+        let mut dialog = app.dialog().file().set_file_name(file_name);
+        for filter in options.filters.into_iter().take(8) {
+            let extensions = filter
+                .extensions
+                .iter()
+                .take(16)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            dialog = dialog.add_filter(
+                filter.name.chars().take(80).collect::<String>(),
+                &extensions,
+            );
+        }
+        dialog.blocking_save_file()
+    })
+    .await
+    .map_err(|error| format!("保存对话框任务失败: {error}"))?;
+    let Some(path) = dialog_path else {
         return Ok(None);
     };
     let path = path
         .into_path()
         .map_err(|_| "保存目标不是本地文件路径".to_string())?;
-    fs::write(&path, bytes).map_err(|error| format!("写入文件失败: {error}"))?;
+    let write_path = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&write_path, bytes))
+        .await
+        .map_err(|error| format!("文件写入任务失败: {error}"))?
+        .map_err(|error| format!("写入文件失败: {error}"))?;
     Ok(Some(path.display().to_string()))
 }
 

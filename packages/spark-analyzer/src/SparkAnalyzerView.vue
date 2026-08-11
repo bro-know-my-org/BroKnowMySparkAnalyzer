@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Github, Language } from "@vicons/fa";
 import DOMPurify from "dompurify";
 import { toPng } from "html-to-image";
@@ -284,7 +284,6 @@ const { message } = createDiscreteApi(["message"], {
   },
 });
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
-const STORED_API_KEY_HANDLE = "__BKMSA_STORED_API_KEY__";
 const report = ref<LoadedReport | null>(null);
 const reportEnvironment = ref<AnyRecord | null>(null);
 const statusKey = ref<StatusKey>("waiting");
@@ -299,6 +298,7 @@ const followUpRunId = ref(0);
 const loadRunId = ref(0);
 const credentialLoadRunId = ref(0);
 let componentAlive = true;
+let hydratingBaseUrl = false;
 const fetchingReport = ref(false);
 const testing = ref(false);
 const fetchingModels = ref(false);
@@ -309,6 +309,16 @@ const diagnosisFullscreen = ref(false);
 const diagnosisRef = ref<HTMLElement | null>(null);
 const providerId = ref("custom");
 const apiKey = ref("");
+let apiKeyRevision = 0;
+let settingApiKey = false;
+watch(apiKey, () => {
+  if (!settingApiKey) apiKeyRevision += 1;
+}, { flush: "sync" });
+function setApiKey(value: string) {
+  settingApiKey = true;
+  apiKey.value = value;
+  settingApiKey = false;
+}
 const baseUrl = ref(providerPresets[0]?.baseUrl ?? "");
 const model = ref(providerPresets[0]?.model ?? "");
 const fetchedModels = ref<string[]>([]);
@@ -507,19 +517,23 @@ watch(debugFeaturesEnabled, (enabled) => {
 watch(baseUrl, async (value, previous) => {
   const normalized = value.trim().replace(/\/$/, "");
   if (normalized === previous.trim().replace(/\/$/, "")) return;
-  const reloadStoredCredential = apiKey.value === STORED_API_KEY_HANDLE;
-  apiKey.value = "";
+  if (hydratingBaseUrl) return;
+  setApiKey("");
+  const initialApiKeyRevision = apiKeyRevision;
   const requestId = ++credentialLoadRunId.value;
-  if (!reloadStoredCredential) return;
+  if (!normalized) return;
   try {
     const loaded = await props.adapter.loadApiKey(value.trim()) ?? "";
     if (
       componentAlive
       && credentialLoadRunId.value === requestId
       && baseUrl.value.trim().replace(/\/$/, "") === normalized
-    ) apiKey.value = loaded;
+      && apiKeyRevision === initialApiKeyRevision
+    ) setApiKey(loaded);
   } catch {
-    if (credentialLoadRunId.value === requestId) apiKey.value = "";
+    if (credentialLoadRunId.value === requestId && apiKeyRevision === initialApiKeyRevision) {
+      setApiKey("");
+    }
   }
 });
 
@@ -716,14 +730,13 @@ async function runAnalysis() {
 }
 
 async function loadLocalAiConfig() {
+  hydratingBaseUrl = true;
   let raw: string | null = null;
   let legacyApiKey = "";
-  let saved: (Partial<AiConfig> & { providerId?: string }) | undefined;
   try {
     raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<AiConfig> & { providerId?: string };
-      saved = parsed;
       if (parsed.providerId && providerPresets.some((preset) => preset.id === parsed.providerId)) {
         providerId.value = parsed.providerId;
       }
@@ -732,27 +745,76 @@ async function loadLocalAiConfig() {
       if (typeof parsed.temperature === "number" && Number.isFinite(parsed.temperature)) {
         temperature.value = parsed.temperature;
       }
-      if (typeof parsed.api_key === "string") legacyApiKey = parsed.api_key.trim();
+      if (typeof parsed.api_key === "string" && parsed.api_key.trim()) {
+        legacyApiKey = parsed.api_key.trim();
+      }
     }
   } catch {
-    window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
-    return;
+    try {
+      window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
+    } catch {
+      // Storage may be unavailable entirely.
+    }
+    raw = null;
+  } finally {
+    await nextTick();
+    hydratingBaseUrl = false;
   }
+  const normalizedBaseUrl = baseUrl.value.trim().replace(/\/$/, "");
+  const initialApiKeyRevision = apiKeyRevision;
+  const requestId = ++credentialLoadRunId.value;
   try {
-    apiKey.value = await props.adapter.loadApiKey(baseUrl.value.trim()) ?? legacyApiKey;
-    if (legacyApiKey && apiKey.value === legacyApiKey) {
-      await props.adapter.storeApiKey(legacyApiKey, baseUrl.value.trim());
+    if (legacyApiKey) {
+      let loaded: string | null = null;
+      try {
+        loaded = await props.adapter.loadApiKey(baseUrl.value.trim());
+      } catch (error) {
+        message.warning(`无法读取系统凭据，将保留旧版 Key 待手动保存: ${String(error)}`);
+      }
+      if (
+        !componentAlive
+        || credentialLoadRunId.value !== requestId
+        || baseUrl.value.trim().replace(/\/$/, "") !== normalizedBaseUrl
+        || apiKeyRevision !== initialApiKeyRevision
+      ) return;
+      try {
+        const currentRaw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
+        if (currentRaw) {
+          const current = JSON.parse(currentRaw) as Record<string, unknown>;
+          const currentBaseUrl = typeof current.base_url === "string"
+            ? current.base_url.trim().replace(/\/$/, "")
+            : "";
+          if (current.api_key !== legacyApiKey || currentBaseUrl !== normalizedBaseUrl) return;
+          delete current.api_key;
+          window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify(current));
+        }
+      } catch (error) {
+        message.error(`无法清理本地明文 API Key: ${String(error)}`);
+        return;
+      }
+      setApiKey(loaded ?? legacyApiKey);
+      if (!loaded) {
+        message.warning("检测到旧版本地 API Key；请确认服务地址后点击保存以迁移到安全存储。");
+      }
+      return;
     }
-    if (saved && "api_key" in saved) {
-      window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
-        providerId: saved.providerId,
-        base_url: saved.base_url,
-        model: saved.model,
-        temperature: saved.temperature,
-      }));
-    }
-  } catch {
-    apiKey.value = legacyApiKey;
+    const loaded = await props.adapter.loadApiKey(baseUrl.value.trim());
+    if (
+      !componentAlive
+      || credentialLoadRunId.value !== requestId
+      || baseUrl.value.trim().replace(/\/$/, "") !== normalizedBaseUrl
+      || apiKeyRevision !== initialApiKeyRevision
+    ) return;
+    setApiKey(loaded ?? "");
+  } catch (error) {
+    if (
+      !componentAlive
+      || credentialLoadRunId.value !== requestId
+      || baseUrl.value.trim().replace(/\/$/, "") !== normalizedBaseUrl
+      || apiKeyRevision !== initialApiKeyRevision
+    ) return;
+    message.error(`加载 AI 凭据失败: ${String(error)}`);
+    return;
   }
   if (raw || apiKey.value) message.success(t.value.msg.aiConfigLoaded);
 }
