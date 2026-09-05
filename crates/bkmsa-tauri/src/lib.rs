@@ -821,7 +821,7 @@ pub fn init_with_authorizer<R: Runtime>(
     authorizer: impl HostAuthorizer + 'static,
 ) -> TauriPlugin<R> {
     let authorization = HostAuthorization(Arc::new(authorizer));
-    Builder::new("bkmsa")
+    Builder::new("bkmsa-tauri")
         .invoke_handler(tauri::generate_handler![
             analyzer_load_report_bytes,
             analyzer_load_text_report,

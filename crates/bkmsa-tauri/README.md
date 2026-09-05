@@ -10,6 +10,8 @@ tauri::Builder::default()
 
 The dialog plugin is required because export writes use a native save dialog and never trust a WebView-provided filesystem path. Grant `"bkmsa-tauri:default"` in the application capability. Vue hosts can use `createTauriSparkAnalyzerAdapter()` from `@bro-know-my/spark-analyzer/tauri` instead of writing IPC bindings manually.
 
+The runtime plugin and generated permission namespace are both `bkmsa-tauri`. Manual IPC bindings must use `plugin:bkmsa-tauri|<command>`; update the Rust crate and npm adapter together to version 0.1.2 or later. The previous `plugin:bkmsa|` prefix did not match the generated capability configuration.
+
 ## Host authorization
 
 `init()` preserves standalone behavior: it allows all host capabilities. It is not an application permission prompt. Embedded applications with user grants must use `init_with_authorizer` and implement `HostAuthorizer` in Rust. The callback checks current host policy before network, credential, or export-write side effects; returning `Err` denies the operation.

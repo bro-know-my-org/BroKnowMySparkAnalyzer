@@ -1,5 +1,12 @@
 use bkmsa_tauri::{HostAuthorizer, HostCapability};
+use tauri::plugin::Plugin;
 use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, INVOKE_KEY};
+
+#[test]
+fn runtime_plugin_name_matches_the_generated_permission_namespace() {
+    let plugin = bkmsa_tauri::init::<tauri::test::MockRuntime>();
+    assert_eq!(plugin.name(), env!("CARGO_PKG_NAME"));
+}
 
 struct DenyNetwork;
 
@@ -25,7 +32,7 @@ impl HostAuthorizer for DenyCredentials {
 
 fn allow_plugin_command(context: &mut tauri::Context<tauri::test::MockRuntime>, command: &str) {
     context.runtime_authority_mut().__allow_command(
-        format!("plugin:bkmsa|{command}"),
+        format!("plugin:bkmsa-tauri|{command}"),
         tauri::utils::acl::ExecutionContext::Local,
     );
 }
@@ -48,7 +55,7 @@ fn invoke_denied(
     get_ipc_response(
         &webview,
         tauri::webview::InvokeRequest {
-            cmd: format!("plugin:bkmsa|{command}"),
+            cmd: format!("plugin:bkmsa-tauri|{command}"),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
             url: "tauri://localhost".parse().expect("URL should parse"),
@@ -78,7 +85,7 @@ fn host_can_block_remote_report_network_access_before_the_request() {
     let response = get_ipc_response(
         &webview,
         tauri::webview::InvokeRequest {
-            cmd: "plugin:bkmsa|analyzer_fetch_report".into(),
+            cmd: "plugin:bkmsa-tauri|analyzer_fetch_report".into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
             url: "tauri://localhost".parse().expect("URL should parse"),
@@ -110,7 +117,7 @@ fn host_can_block_api_key_storage_before_keyring_access() {
     let response = get_ipc_response(
         &webview,
         tauri::webview::InvokeRequest {
-            cmd: "plugin:bkmsa|analyzer_store_api_key".into(),
+            cmd: "plugin:bkmsa-tauri|analyzer_store_api_key".into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
             url: "tauri://localhost".parse().expect("URL should parse"),
@@ -148,7 +155,7 @@ fn host_can_block_api_key_loading_before_keyring_access() {
     let response = get_ipc_response(
         &webview,
         tauri::webview::InvokeRequest {
-            cmd: "plugin:bkmsa|analyzer_load_api_key".into(),
+            cmd: "plugin:bkmsa-tauri|analyzer_load_api_key".into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
             url: "tauri://localhost".parse().expect("URL should parse"),
