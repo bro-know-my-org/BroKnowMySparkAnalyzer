@@ -53,6 +53,8 @@ const adapter: SparkAnalyzerAdapter = {
 
 UI 不直接调用 Tauri 或 WASM API。仓库内的 standalone host 在桌面端把 adapter 映射到 `analyzer_*` Tauri commands，在浏览器端延迟加载 `bkmsa-wasm`。
 
+包内样式仅作用于组件自动设置的 `.bkmsa-scope` 边界，包括全屏诊断和图片导出节点，不修改宿主的根主题变量、标题或通用布局类。宿主无需给应用根节点添加这个类。
+
 Tauri 2 宿主推荐直接使用配套的 `bkmsa-tauri` crate 和包内 adapter：
 
 ```rust

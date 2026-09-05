@@ -1013,7 +1013,7 @@ async function exportDiagnosisImage() {
     });
     if (!path) return;
     exportNode = document.createElement("section");
-    exportNode.className = `markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
+    exportNode.className = `bkmsa-scope markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
     exportNode.innerHTML = renderedMarkdown.value;
     document.body.appendChild(exportNode);
     const dataUrl = await toPng(exportNode, {
@@ -1404,7 +1404,7 @@ const InfoTip = (props: { text: string }) =>
 <template>
   <n-config-provider :theme="naiveTheme">
     <n-message-provider>
-      <n-layout class="app-shell" :data-theme="themeMode" :data-embedded="String(props.embedded)">
+      <n-layout class="bkmsa-scope app-shell" :data-theme="themeMode" :data-embedded="String(props.embedded)">
         <header class="window-titlebar" :data-embedded="String(props.embedded)">
           <div v-if="!props.embedded" class="window-title">
             <div class="title-stack">
@@ -1697,7 +1697,7 @@ const InfoTip = (props: { text: string }) =>
       </n-layout>
 
       <n-modal v-model:show="diagnosisFullscreen" display-directive="show">
-        <section class="fullscreen-diagnosis" :data-theme="themeMode">
+        <section class="bkmsa-scope fullscreen-diagnosis" :data-theme="themeMode">
           <header>
             <h2>{{ t.ui.diagnosis }}</h2>
             <n-space :wrap="false" size="small">
