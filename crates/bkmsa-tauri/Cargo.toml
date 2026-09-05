@@ -13,7 +13,6 @@ links = "bkmsa-tauri"
 base64 = "0.22"
 bkmsa-agent = { workspace = true, features = ["native-client"] }
 bkmsa-core.workspace = true
-keyring = "3"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde.workspace = true
@@ -24,5 +23,17 @@ tokio = { version = "1", features = ["macros", "rt"] }
 tokio-util = "0.7"
 url.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }
+
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
+
+[dev-dependencies]
+tauri = { version = "2", default-features = false, features = ["test"] }

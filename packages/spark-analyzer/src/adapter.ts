@@ -52,6 +52,18 @@ export type AiConfig = {
 
 export type AiModelInfo = { id: string };
 
+export type SparkAnalyzerPreferences = {
+  providerId?: string;
+  base_url?: string;
+  model?: string;
+  temperature?: number;
+};
+
+export interface SparkAnalyzerPreferencesStore {
+  load(): Promise<SparkAnalyzerPreferences | null>;
+  save(preferences: SparkAnalyzerPreferences): Promise<void>;
+}
+
 export type AgentTrace = {
   round: number;
   role: "assistant" | "tool" | "system";

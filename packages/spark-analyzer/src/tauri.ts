@@ -5,7 +5,7 @@ import type {
   SparkAnalyzerAdapter,
 } from "./adapter";
 
-const command = (name: string) => `plugin:bkmsa|${name}`;
+const command = (name: string) => `plugin:bkmsa-tauri|${name}`;
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
 
 async function invoke<T>(name: string, args: Record<string, unknown>): Promise<T> {

@@ -1,6 +1,6 @@
 {
   "name": "@bro-know-my/spark-analyzer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pure Vue UI for the bkmsa Rust analyzer.",
   "type": "module",
   "license": "MIT",
@@ -40,6 +40,7 @@
     "./style.css": "./dist/style.css"
   },
   "scripts": {
+    "test": "vitest run",
     "build": "vite build && vue-tsc -p tsconfig.json --declaration --emitDeclarationOnly",
     "pack:dry": "npm pack --dry-run",
     "prepublishOnly": "pnpm run build"
@@ -71,8 +72,11 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/test-utils": "^2.5.0",
+    "jsdom": "^26.1.0",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
+    "vitest": "^3.2.7",
     "vue-tsc": "^2.2.12"
   }
 }

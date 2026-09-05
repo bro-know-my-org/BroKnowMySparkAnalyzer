@@ -212,7 +212,7 @@ pnpm --dir packages/spark-analyzer build
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.1"
+bkmsa-tauri = "0.1.2"
 ```
 
 ```rust
@@ -221,6 +221,8 @@ tauri::Builder::default()
 ```
 
 应用 capability 需要加入 `"bkmsa-tauri:default"`。前端安装 UI 和宿主插件后创建 adapter：
+
+`init()` 默认允许全部宿主能力。需要用户授权的嵌入应用应使用 Rust `init_with_authorizer` / `HostAuthorizer`，见 [后端授权说明](crates/bkmsa-tauri/README.md#host-authorization)。
 
 ```ts
 import { SparkAnalyzerView } from "@bro-know-my/spark-analyzer";
@@ -476,7 +478,7 @@ To embed the analyzer in another Tauri 2 application:
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.1"
+bkmsa-tauri = "0.1.2"
 ```
 
 ```rust
@@ -485,6 +487,8 @@ tauri::Builder::default()
 ```
 
 Add `"bkmsa-tauri:default"` to the application capability. Install the UI and host plugins, then create the frontend adapter:
+
+`init()` allows all host capabilities by default. Embedded applications with user grants should use Rust `init_with_authorizer` / `HostAuthorizer`; see [backend authorization](crates/bkmsa-tauri/README.md#host-authorization).
 
 ```ts
 import { SparkAnalyzerView } from "@bro-know-my/spark-analyzer";

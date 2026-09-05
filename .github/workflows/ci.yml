@@ -44,7 +44,7 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libayatana-appindicator3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install -y dbus-x11 gnome-keyring libayatana-appindicator3-dev libwebkit2gtk-4.1-dev
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -61,6 +61,13 @@ jobs:
 
       - name: Test Rust workspace
         run: cargo test --locked --workspace --all-targets --all-features
+
+      - name: Test system credential storage
+        run: |
+          dbus-run-session -- bash -c '
+            eval "$(printf "bkmsa-ci-keyring\n" | gnome-keyring-daemon --unlock --components=secrets)"
+            cargo test --locked -p bkmsa-tauri credential_ -- --ignored --nocapture
+          '
 
       - name: Check Tauri shell
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
@@ -82,6 +89,7 @@ jobs:
       - name: Build UI package
         run: |
           pnpm --dir packages/spark-analyzer build
+          pnpm --dir packages/spark-analyzer test
           pnpm --dir packages/spark-analyzer run pack:dry
 
       - name: Check publishable core package
@@ -122,6 +130,9 @@ jobs:
 
       - name: Check Rust workspace
         run: cargo check --locked --workspace --all-targets --all-features
+
+      - name: Test system credential storage
+        run: cargo test --locked -p bkmsa-tauri credential_ -- --ignored --nocapture
 
       - name: Check Tauri shell
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets

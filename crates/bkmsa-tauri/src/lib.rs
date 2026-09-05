@@ -20,6 +20,35 @@ const MAX_SAVE_DIALOG_OPTIONS_BYTES: usize = 16 * 1024;
 const STORED_API_KEY_HANDLE: &str = "__BKMSA_STORED_API_KEY__";
 static CREDENTIAL_OPERATION_LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostCapability {
+    Network,
+    Credentials,
+    FilesystemWrite,
+}
+
+/// Host policy checked in Rust before protected command side effects.
+/// Implementations should consult current grants and return an error on denial.
+pub trait HostAuthorizer: Send + Sync {
+    fn authorize(&self, capability: HostCapability) -> Result<(), String>;
+}
+
+struct AllowAllHostAuthorizer;
+
+impl HostAuthorizer for AllowAllHostAuthorizer {
+    fn authorize(&self, _capability: HostCapability) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct HostAuthorization(Arc<dyn HostAuthorizer>);
+
+impl HostAuthorization {
+    fn authorize(&self, capability: HostCapability) -> Result<(), String> {
+        self.0.authorize(capability)
+    }
+}
+
 #[derive(Debug)]
 struct RemoteReport {
     bytes: Vec<u8>,
@@ -143,6 +172,112 @@ fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
         .map_err(|error| format!("无法打开系统凭据存储: {error}"))
 }
 
+#[cfg(test)]
+mod credential_tests {
+    use super::credential_entry;
+    use std::process::{Command, Output};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const HELPER_ACTION: &str = "BKMSA_CREDENTIAL_TEST_ACTION";
+    const HELPER_ACCOUNT: &str = "BKMSA_CREDENTIAL_TEST_ACCOUNT";
+    const HELPER_PASSWORD: &str = "BKMSA_CREDENTIAL_TEST_PASSWORD";
+
+    fn unique_credential() -> (String, String) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        (
+            format!("bkmsa-credential-test-{}-{unique}", std::process::id()),
+            format!("test-secret-{unique}"),
+        )
+    }
+
+    fn run_helper(action: &str, account: &str, password: &str) -> Output {
+        Command::new(std::env::current_exe().expect("test executable should be available"))
+            .args([
+                "--exact",
+                "credential_tests::credential_subprocess_helper",
+                "--nocapture",
+            ])
+            .env(HELPER_ACTION, action)
+            .env(HELPER_ACCOUNT, account)
+            .env(HELPER_PASSWORD, password)
+            .output()
+            .expect("credential helper process should start")
+    }
+
+    fn assert_helper_succeeded(output: &Output, action: &str) {
+        assert!(
+            output.status.success(),
+            "credential helper failed to {action}:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an unlocked platform credential store"]
+    fn credential_can_be_reopened_after_storage() {
+        let (account, password) = unique_credential();
+
+        let writer = credential_entry(&account).expect("credential store should be available");
+        writer
+            .set_password(&password)
+            .expect("credential should be stored");
+
+        let reader = credential_entry(&account).expect("credential store should be reopened");
+        let reopened = reader.get_password();
+        let _ = writer.delete_credential();
+
+        assert_eq!(
+            reopened.expect("stored credential should survive reopening"),
+            password
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an unlocked platform credential store"]
+    fn credential_survives_a_new_process() {
+        let (account, password) = unique_credential();
+
+        let write = run_helper("write", &account, &password);
+        assert_helper_succeeded(&write, "write");
+
+        let read = run_helper("read", &account, &password);
+        let delete = run_helper("delete", &account, &password);
+
+        assert_helper_succeeded(&delete, "delete");
+        assert_helper_succeeded(&read, "read");
+    }
+
+    #[test]
+    fn credential_subprocess_helper() {
+        let Ok(action) = std::env::var(HELPER_ACTION) else {
+            return;
+        };
+        let account = std::env::var(HELPER_ACCOUNT).expect("helper account should be provided");
+        let password = std::env::var(HELPER_PASSWORD).expect("helper password should be provided");
+        let entry = credential_entry(&account).expect("credential store should be available");
+
+        match action.as_str() {
+            "write" => entry
+                .set_password(&password)
+                .expect("credential should be stored"),
+            "read" => assert_eq!(
+                entry
+                    .get_password()
+                    .expect("credential should survive a new process"),
+                password
+            ),
+            "delete" => entry
+                .delete_credential()
+                .expect("credential should be deleted"),
+            _ => panic!("unknown credential helper action: {action}"),
+        }
+    }
+}
+
 fn api_key_entry() -> Result<keyring::Entry, String> {
     credential_entry("bkmsa-ai-credentials")
 }
@@ -213,7 +348,11 @@ fn store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn analyzer_store_api_key(request: StoreApiKeyRequest) -> Result<(), String> {
+async fn analyzer_store_api_key(
+    request: StoreApiKeyRequest,
+    authorization: tauri::State<'_, HostAuthorization>,
+) -> Result<(), String> {
+    authorization.authorize(HostCapability::Credentials)?;
     run_credential_operation("保存 AI 凭据任务失败", move || {
         store_api_key(request)
     })
@@ -247,7 +386,11 @@ fn load_api_key(base_url: Option<String>) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn analyzer_load_api_key(base_url: Option<String>) -> Result<Option<String>, String> {
+async fn analyzer_load_api_key(
+    base_url: Option<String>,
+    authorization: tauri::State<'_, HostAuthorization>,
+) -> Result<Option<String>, String> {
+    authorization.authorize(HostCapability::Credentials)?;
     run_credential_operation("读取 AI 凭据任务失败", move || {
         load_api_key(base_url)
     })
@@ -281,7 +424,10 @@ async fn resolve_ai_config(config: bkmsa_agent::AiConfig) -> Result<bkmsa_agent:
 }
 
 #[tauri::command]
-async fn analyzer_delete_api_key() -> Result<(), String> {
+async fn analyzer_delete_api_key(
+    authorization: tauri::State<'_, HostAuthorization>,
+) -> Result<(), String> {
+    authorization.authorize(HostCapability::Credentials)?;
     run_credential_operation("删除 AI 凭据任务失败", || {
         let mut errors = Vec::new();
         for entry in [api_key_entry(), legacy_api_key_entry()] {
@@ -345,7 +491,9 @@ fn analyzer_load_text_report(
 async fn analyzer_fetch_report(
     input: String,
     state: tauri::State<'_, AnalyzerState>,
+    authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<LoadedReport, String> {
+    authorization.authorize(HostCapability::Network)?;
     let _permit = state.try_acquire_report_load_permit()?;
     let remote = fetch_remote_report(&input).await?;
     let hint = format!("{} {}", remote.content_type, remote.resolved_url);
@@ -380,7 +528,10 @@ fn analyzer_release_report(
 async fn analyzer_run_analysis(
     request: RunAnalysisRequest,
     state: tauri::State<'_, AnalyzerState>,
+    authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<bkmsa_agent::AgentResult, String> {
+    authorization.authorize(HostCapability::Network)?;
+    authorization.authorize(HostCapability::Credentials)?;
     let report = state.get(&request.report_id)?;
     let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config).await?)
         .map_err(|error| error.to_string())?;
@@ -409,9 +560,12 @@ fn analyzer_cancel_analysis(
 async fn analyzer_ask_follow_up(
     request: AskFollowUpRequest,
     state: tauri::State<'_, AnalyzerState>,
+    authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<String, String> {
     use bkmsa_agent::ToolExecutor;
 
+    authorization.authorize(HostCapability::Network)?;
+    authorization.authorize(HostCapability::Credentials)?;
     let report = state.get(&request.report_id)?;
     let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(request.config).await?)
         .map_err(|error| error.to_string())?;
@@ -435,7 +589,12 @@ async fn analyzer_ask_follow_up(
 }
 
 #[tauri::command]
-async fn analyzer_test_ai_connection(config: bkmsa_agent::AiConfig) -> Result<String, String> {
+async fn analyzer_test_ai_connection(
+    config: bkmsa_agent::AiConfig,
+    authorization: tauri::State<'_, HostAuthorization>,
+) -> Result<String, String> {
+    authorization.authorize(HostCapability::Network)?;
+    authorization.authorize(HostCapability::Credentials)?;
     let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config).await?)
         .map_err(|error| error.to_string())?;
     client
@@ -448,7 +607,10 @@ async fn analyzer_test_ai_connection(config: bkmsa_agent::AiConfig) -> Result<St
 #[tauri::command]
 async fn analyzer_list_ai_models(
     config: bkmsa_agent::AiConfig,
+    authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<Vec<bkmsa_agent::ModelInfo>, String> {
+    authorization.authorize(HostCapability::Network)?;
+    authorization.authorize(HostCapability::Credentials)?;
     let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config).await?)
         .map_err(|error| error.to_string())?;
     client
@@ -520,7 +682,9 @@ async fn fetch_remote_report(input: &str) -> Result<RemoteReport, String> {
 async fn save_export_file<R: Runtime>(
     request: SaveExportRequest,
     app: tauri::AppHandle<R>,
+    authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<Option<String>, String> {
+    authorization.authorize(HostCapability::FilesystemWrite)?;
     if request.bytes_base64.len() > MAX_EXPORT_BYTES.saturating_mul(4) / 3 + 16 {
         return Err("导出内容超过 32 MiB 限制".to_string());
     }
@@ -645,8 +809,19 @@ fn redact_url(mut url: Url) -> String {
 }
 
 /// Initializes the reusable native backend used by every Tauri host.
+///
+/// This preserves the standalone policy: all host capabilities are allowed.
+/// Embedded hosts with their own grants should use [init_with_authorizer].
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::new("bkmsa")
+    init_with_authorizer(AllowAllHostAuthorizer)
+}
+
+/// Initializes the native backend with a host-provided system capability authorizer.
+pub fn init_with_authorizer<R: Runtime>(
+    authorizer: impl HostAuthorizer + 'static,
+) -> TauriPlugin<R> {
+    let authorization = HostAuthorization(Arc::new(authorizer));
+    Builder::new("bkmsa-tauri")
         .invoke_handler(tauri::generate_handler![
             analyzer_load_report_bytes,
             analyzer_load_text_report,
@@ -663,8 +838,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             analyzer_delete_api_key,
             save_export_file
         ])
-        .setup(|app, _api| {
+        .setup(move |app, _api| {
             app.manage(AnalyzerState::default());
+            app.manage(authorization);
             Ok(())
         })
         .build()

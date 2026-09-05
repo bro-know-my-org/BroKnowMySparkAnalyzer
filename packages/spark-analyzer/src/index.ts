@@ -14,5 +14,7 @@ export type {
   ReportKind,
   ReportSummary,
   SavePathOptions,
+  SparkAnalyzerPreferences,
+  SparkAnalyzerPreferencesStore,
   SparkAnalyzerAdapter,
 } from "./adapter";

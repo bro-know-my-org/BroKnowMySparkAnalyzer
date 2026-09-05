@@ -53,6 +53,8 @@ const adapter: SparkAnalyzerAdapter = {
 
 UI 不直接调用 Tauri 或 WASM API。仓库内的 standalone host 在桌面端把 adapter 映射到 `analyzer_*` Tauri commands，在浏览器端延迟加载 `bkmsa-wasm`。
 
+包内样式仅作用于组件自动设置的 `.bkmsa-scope` 边界，包括全屏诊断和图片导出节点，不修改宿主的根主题变量、标题或通用布局类。宿主无需给应用根节点添加这个类。
+
 Tauri 2 宿主推荐直接使用配套的 `bkmsa-tauri` crate 和包内 adapter：
 
 ```rust
@@ -61,6 +63,8 @@ tauri::Builder::default()
 ```
 
 在 capability 中加入 `"bkmsa-tauri:default"`，然后：
+
+`init()` 默认允许全部宿主能力。需要用户授权的嵌入应用应改用 Rust `init_with_authorizer` / `HostAuthorizer`；实现方式见 [后端授权说明](https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer/blob/master/crates/bkmsa-tauri/README.md#host-authorization)。
 
 ```ts
 import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
@@ -77,6 +81,29 @@ const adapter = createTauriSparkAnalyzerAdapter();
 ```
 
 不传 `debug` 时，组件保留 standalone 默认行为。
+
+嵌入式宿主还可以控制语言、主题，并把非敏感 AI 偏好保存到自己的数据目录：
+
+```ts
+import type { SparkAnalyzerPreferencesStore } from "@bro-know-my/spark-analyzer";
+
+const preferencesStore: SparkAnalyzerPreferencesStore = {
+  load: () => hostBridge.loadSparkPreferences(),
+  save: (preferences) => hostBridge.saveSparkPreferences(preferences),
+};
+```
+
+```vue
+<SparkAnalyzerView
+  :adapter="adapter"
+  language="zh"
+  theme="dark"
+  :preferences-store="preferencesStore"
+  embedded
+/>
+```
+
+传入 `language` 或 `theme` 后，对应的组件内切换器会隐藏，宿主值保持权威。传入 `preferencesStore` 后，provider、base URL、模型和 temperature 不再写入 `localStorage`。API Key 不会进入该 store，仍只通过 adapter 的凭据方法存取。
 
 ### 构建
 
@@ -146,6 +173,8 @@ tauri::Builder::default()
 
 Add `"bkmsa-tauri:default"` to the capability, then:
 
+`init()` allows all host capabilities by default. Embedded applications with user grants should use Rust `init_with_authorizer` / `HostAuthorizer`; see [backend authorization](https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer/blob/master/crates/bkmsa-tauri/README.md#host-authorization).
+
 ```ts
 import { createTauriSparkAnalyzerAdapter } from "@bro-know-my/spark-analyzer/tauri";
 
@@ -161,6 +190,29 @@ The host may control debug mode explicitly:
 ```
 
 When `debug` is omitted, the component keeps its standalone default behavior.
+
+Embedded hosts can also control language and theme and persist non-sensitive AI preferences in their own data root:
+
+```ts
+import type { SparkAnalyzerPreferencesStore } from "@bro-know-my/spark-analyzer";
+
+const preferencesStore: SparkAnalyzerPreferencesStore = {
+  load: () => hostBridge.loadSparkPreferences(),
+  save: (preferences) => hostBridge.saveSparkPreferences(preferences),
+};
+```
+
+```vue
+<SparkAnalyzerView
+  :adapter="adapter"
+  language="en"
+  theme="dark"
+  :preferences-store="preferencesStore"
+  embedded
+/>
+```
+
+When `language` or `theme` is supplied, the matching in-component selector is hidden and the host value remains authoritative. With `preferencesStore`, provider, base URL, model, and temperature no longer use `localStorage`. API keys never enter this store and continue through the adapter credential methods.
 
 ### Build
 
