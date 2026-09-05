@@ -10,14 +10,14 @@ members = [
 exclude = ["src-tauri"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer"
 
 [workspace.dependencies]
-bkmsa-core = { version = "0.1.1", path = "crates/bkmsa-core" }
-bkmsa-agent = { version = "0.1.1", path = "crates/bkmsa-agent", default-features = false }
+bkmsa-core = { version = "0.1.2", path = "crates/bkmsa-core" }
+bkmsa-agent = { version = "0.1.2", path = "crates/bkmsa-agent", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
