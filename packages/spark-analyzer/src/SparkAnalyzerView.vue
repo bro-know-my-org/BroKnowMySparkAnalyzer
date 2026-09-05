@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Github, Language } from "@vicons/fa";
 import DOMPurify from "dompurify";
 import { toPng } from "html-to-image";
@@ -36,12 +36,16 @@ import type {
   FollowUpMessage,
   LoadedReport,
   SparkAnalyzerAdapter,
+  SparkAnalyzerPreferences,
+  SparkAnalyzerPreferencesStore,
 } from "./adapter";
 
 const props = defineProps<{
   adapter: SparkAnalyzerAdapter;
   embedded?: boolean;
   language?: Lang;
+  theme?: ThemeMode;
+  preferencesStore?: SparkAnalyzerPreferencesStore;
   debug?: boolean;
 }>();
 
@@ -323,8 +327,13 @@ const baseUrl = ref(providerPresets[0]?.baseUrl ?? "");
 const model = ref(providerPresets[0]?.model ?? "");
 const fetchedModels = ref<string[]>([]);
 const temperature = ref(0.2);
+const aiConfigSaving = ref(false);
+let aiConfigRevision = 0;
+watch([providerId, baseUrl, model, temperature, apiKey], () => {
+  aiConfigRevision += 1;
+}, { flush: "sync" });
 const language = ref<Lang>("zh");
-const themeMode = ref<ThemeMode>("dark");
+const themeMode = ref<ThemeMode>(props.theme ?? "dark");
 const debugMode = ref(false);
 const altPressed = ref(false);
 
@@ -335,6 +344,8 @@ const languageOptions: SelectOption[] = [
   { label: "中文", value: "zh" },
   { label: "English", value: "en" },
 ];
+const languageControlled = computed(() => Boolean(props.language));
+const themeControlled = computed(() => Boolean(props.theme));
 const lightThemeEnabled = computed({
   get: () => themeMode.value === "light",
   set: (enabled: boolean) => {
@@ -535,7 +546,7 @@ watch(baseUrl, async (value, previous) => {
       setApiKey("");
     }
   }
-});
+}, { flush: "sync" });
 
 watch(
   () => props.language,
@@ -543,6 +554,14 @@ watch(
     if (value) {
       language.value = value;
     }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.theme,
+  (value) => {
+    if (value) themeMode.value = value;
   },
   { immediate: true },
 );
@@ -730,13 +749,27 @@ async function runAnalysis() {
 }
 
 async function loadLocalAiConfig() {
-  hydratingBaseUrl = true;
+  const initialConfigRevision = aiConfigRevision;
+  const initialCredentialRequestId = credentialLoadRunId.value;
+  const initialUserApiKeyRevision = apiKeyRevision;
   let raw: string | null = null;
+  let stored: (SparkAnalyzerPreferences & { api_key?: string }) | null = null;
   let legacyApiKey = "";
   try {
-    raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AiConfig> & { providerId?: string };
+    if (props.preferencesStore) {
+      stored = await props.preferencesStore.load();
+    } else {
+      raw = window.localStorage.getItem(AI_CONFIG_STORAGE_KEY);
+      stored = raw
+        ? (JSON.parse(raw) as SparkAnalyzerPreferences & { api_key?: string })
+        : null;
+    }
+    // A delayed host read must never replace edits made while it was pending.
+    if (!componentAlive) return;
+    if (aiConfigRevision !== initialConfigRevision) stored = null;
+    hydratingBaseUrl = true;
+    if (stored) {
+      const parsed = stored;
       if (parsed.providerId && providerPresets.some((preset) => preset.id === parsed.providerId)) {
         providerId.value = parsed.providerId;
       }
@@ -750,21 +783,29 @@ async function loadLocalAiConfig() {
       }
     }
   } catch {
-    try {
-      window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
-    } catch {
-      // Storage may be unavailable entirely.
+    if (!componentAlive) return;
+    if (!props.preferencesStore) {
+      try {
+        window.localStorage.removeItem(AI_CONFIG_STORAGE_KEY);
+      } catch {
+        // Storage may be unavailable entirely.
+      }
     }
     raw = null;
+    stored = null;
   } finally {
-    await nextTick();
     hydratingBaseUrl = false;
   }
+  if (
+    !componentAlive
+    || credentialLoadRunId.value !== initialCredentialRequestId
+    || apiKeyRevision !== initialUserApiKeyRevision
+  ) return;
   const normalizedBaseUrl = baseUrl.value.trim().replace(/\/$/, "");
   const initialApiKeyRevision = apiKeyRevision;
   const requestId = ++credentialLoadRunId.value;
   try {
-    if (legacyApiKey) {
+    if (legacyApiKey && !props.preferencesStore) {
       let loaded: string | null = null;
       try {
         loaded = await props.adapter.loadApiKey(baseUrl.value.trim());
@@ -816,24 +857,35 @@ async function loadLocalAiConfig() {
     message.error(`加载 AI 凭据失败: ${String(error)}`);
     return;
   }
-  if (raw || apiKey.value) message.success(t.value.msg.aiConfigLoaded);
+  if (stored || apiKey.value) message.success(t.value.msg.aiConfigLoaded);
 }
 
 async function saveLocalAiConfig() {
+  if (aiConfigSaving.value) return;
+  aiConfigSaving.value = true;
   try {
-    window.localStorage.setItem(AI_CONFIG_STORAGE_KEY, JSON.stringify({
+    const savedApiKey = apiKey.value.trim();
+    const preferences: SparkAnalyzerPreferences = {
       providerId: providerId.value,
       base_url: baseUrl.value.trim(),
       model: model.value.trim(),
       temperature: Number(temperature.value ?? 0.2),
-    }));
-    if (apiKey.value.trim()) {
-      await props.adapter.storeApiKey(apiKey.value.trim(), baseUrl.value.trim());
+    };
+    if (props.preferencesStore) await props.preferencesStore.save(preferences);
+    else
+      window.localStorage.setItem(
+        AI_CONFIG_STORAGE_KEY,
+        JSON.stringify(preferences),
+      );
+    if (savedApiKey) {
+      await props.adapter.storeApiKey(savedApiKey, preferences.base_url ?? "");
     }
     else await props.adapter.deleteApiKey();
     message.success(t.value.msg.aiConfigSaved);
   } catch (error) {
     message.error(`${t.value.msg.aiConfigSaveFailed}: ${String(error)}`);
+  } finally {
+    aiConfigSaving.value = false;
   }
 }
 
@@ -1368,11 +1420,11 @@ const InfoTip = (props: { text: string }) =>
             <span>{{ t.ui.subtitle }}</span>
           </div>
           <n-space align="center" class="top-actions" :wrap="false" @mousedown.stop>
-            <div class="control-pair">
+            <div v-if="!languageControlled" class="control-pair">
               <n-icon class="control-icon" :component="Language" />
               <n-select v-model:value="language" class="language-select" size="small" :options="languageOptions" />
             </div>
-            <div class="control-pair">
+            <div v-if="!themeControlled" class="control-pair">
               <n-switch v-model:value="lightThemeEnabled" size="small">
                 <template #checked>{{ t.ui.light }}</template>
                 <template #unchecked>{{ t.ui.dark }}</template>
@@ -1445,7 +1497,7 @@ const InfoTip = (props: { text: string }) =>
               <div class="panel-title">
                 <h2>AI</h2>
                 <div class="panel-title-actions">
-                  <n-button size="small" secondary @click="saveLocalAiConfig">{{ t.ui.saveAiConfig }}</n-button>
+                  <n-button size="small" secondary :loading="aiConfigSaving" :disabled="aiConfigSaving" @click="saveLocalAiConfig">{{ t.ui.saveAiConfig }}</n-button>
                   <component :is="InfoTip" :text="t.ui.aiTip" />
                 </div>
               </div>
