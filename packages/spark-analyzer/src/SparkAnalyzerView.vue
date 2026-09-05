@@ -2,7 +2,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Github, Language } from "@vicons/fa";
 import DOMPurify from "dompurify";
-import { toPng } from "html-to-image";
+import { renderDiagnosisImage } from "./image-export";
 import { marked } from "marked";
 import {
   darkTheme,
@@ -1005,29 +1005,18 @@ async function exportDiagnosisImage() {
     message.warning(t.value.msg.noDiagnosis);
     return;
   }
-  let exportNode: HTMLElement | null = null;
   try {
     const path = await props.adapter.pickSavePath({
       defaultPath: `${exportBaseName()}.png`,
       filters: [{ name: "PNG Image", extensions: ["png"] }],
     });
     if (!path) return;
-    exportNode = document.createElement("section");
-    exportNode.className = `bkmsa-scope markdown-body image-export-node ${themeMode.value === "light" ? "image-export-light" : ""}`;
-    exportNode.innerHTML = renderedMarkdown.value;
-    document.body.appendChild(exportNode);
-    const dataUrl = await toPng(exportNode, {
-      cacheBust: true,
-      pixelRatio: 2,
-      backgroundColor: themeMode.value === "dark" ? "#10161b" : "#f8fafb",
-    });
+    const dataUrl = await renderDiagnosisImage(renderedMarkdown.value, themeMode.value);
     const savedPath = await props.adapter.saveExportFile(path, dataUrlToBase64(dataUrl));
     if (!savedPath) return;
     message.success(`${t.value.msg.exported} ${savedPath}`);
   } catch (error) {
     message.error(`${t.value.msg.exportFailed}: ${String(error)}`);
-  } finally {
-    exportNode?.remove();
   }
 }
 

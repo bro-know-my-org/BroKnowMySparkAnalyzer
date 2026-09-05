@@ -212,7 +212,7 @@ pnpm --dir packages/spark-analyzer build
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.2"
+bkmsa-tauri = "0.1.3"
 ```
 
 ```rust
@@ -478,7 +478,7 @@ To embed the analyzer in another Tauri 2 application:
 
 ```toml
 [dependencies]
-bkmsa-tauri = "0.1.2"
+bkmsa-tauri = "0.1.3"
 ```
 
 ```rust
