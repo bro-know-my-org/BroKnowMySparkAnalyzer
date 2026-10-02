@@ -42,7 +42,9 @@ impl<'de> Deserialize<'de> for AiConfig {
             temperature: raw.temperature,
             timeout_secs: raw.timeout_secs,
         };
-        config.validate().map_err(serde::de::Error::custom)?;
+        config
+            .validate_provider()
+            .map_err(serde::de::Error::custom)?;
         Ok(config)
     }
 }
@@ -83,7 +85,7 @@ impl AiConfig {
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Result<Self> {
         self.api_key = api_key.into();
-        self.validate()?;
+        self.validate_provider()?;
         Ok(self)
     }
 
@@ -153,6 +155,16 @@ impl AiConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.validate_provider()?;
+        if self.model.trim().is_empty() {
+            return Err(AgentError::InvalidConfig("model cannot be empty".into()));
+        }
+        Ok(())
+    }
+
+    /// Validates provider access before a model has been selected.
+    /// Chat operations must additionally call `validate`.
+    pub fn validate_provider(&self) -> Result<()> {
         if self.base_url.len() > 2_048 || self.model.len() > 256 || self.api_key.len() > 16_384 {
             return Err(AgentError::InvalidConfig(
                 "base_url, model, or api_key exceeds its length limit".into(),
@@ -166,9 +178,6 @@ impl AiConfig {
         validate_base_url(&self.base_url)?;
         if self.api_key.trim().is_empty() {
             return Err(AgentError::MissingConfig("BKMSA_API_KEY"));
-        }
-        if self.model.trim().is_empty() {
-            return Err(AgentError::InvalidConfig("model cannot be empty".into()));
         }
         if !(0.0..=2.0).contains(&self.temperature) {
             return Err(AgentError::InvalidConfig(
@@ -257,6 +266,33 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deserialization_permits_discovery_before_model_selection() {
+        let mut raw = serde_json::json!({
+            "base_url": "https://example.test/v1",
+            "api_key": "secret",
+            "model": "",
+            "temperature": 0.2
+        });
+        for model in ["", "   "] {
+            raw["model"] = model.into();
+            let config: AiConfig = serde_json::from_value(raw.clone()).unwrap();
+            assert!(config.validate_provider().is_ok());
+            assert!(config.validate().is_err());
+            // Resolving a stored credential must also work before model selection.
+            assert!(config.with_api_key("resolved-secret").is_ok());
+        }
+        for (field, value) in [
+            ("base_url", "http://example.test/v1"),
+            ("api_key", ""),
+            ("model", "bad\nmodel"),
+        ] {
+            let mut invalid = raw.clone();
+            invalid[field] = value.into();
+            assert!(serde_json::from_value::<AiConfig>(invalid).is_err());
+        }
+    }
 
     #[cfg(feature = "native-client")]
     #[test]

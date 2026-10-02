@@ -34,6 +34,12 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     pub fn new(config: AiConfig) -> Result<Self> {
         config.validate()?;
+        Self::for_model_listing(config)
+    }
+
+    /// Creates a provider client before a model has been selected.
+    pub fn for_model_listing(config: AiConfig) -> Result<Self> {
+        config.validate_provider()?;
         let mut builder = Client::builder()
             .timeout(config.timeout())
             .redirect(reqwest::redirect::Policy::none());
@@ -73,6 +79,7 @@ impl OpenAiClient {
     }
 
     async fn request_chat(&self, messages: &[ChatMessage]) -> Result<String> {
+        self.config.validate()?;
         validate_messages(messages)?;
         let request = ChatRequest {
             model: self.config.model(),
@@ -297,4 +304,31 @@ struct ProviderErrorBody {
 #[cfg(feature = "native-client")]
 struct ProviderErrorDetail {
     message: String,
+}
+
+#[cfg(all(test, feature = "native-client"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn discovery_client_still_rejects_chat_without_a_model() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "base_url": "http://127.0.0.1:1/v1",
+            "api_key": "test-key",
+            "model": "",
+            "temperature": 0.2
+        }))
+        .unwrap();
+        assert!(OpenAiClient::new(config.clone()).is_err());
+        let client = OpenAiClient::for_model_listing(config).unwrap();
+        for result in [
+            client.test_connection().await,
+            client.chat(&[ChatMessage::user("hello")]).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(AgentError::InvalidConfig(message)) if message == "model cannot be empty"
+            ));
+        }
+    }
 }

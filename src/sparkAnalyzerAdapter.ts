@@ -15,7 +15,7 @@ type WasmAnalyzer = {
   loadReportBytes(bytes: Uint8Array, source: string, hint?: string): Promise<LoadedReport> | LoadedReport;
   loadTextReport(text: string, source?: string): Promise<LoadedReport> | LoadedReport;
   executeTool(reportId: string, tool: string, args?: JsonRecord): Promise<unknown> | unknown;
-  runAnalysis(reportId: string, config: AiConfig): Promise<AnalysisResult>;
+  runAnalysis(reportId: string, config: AiConfig, onTrace?: (trace: AgentTrace) => void): Promise<AnalysisResult>;
   cancelAnalysis?(reportId: string): Promise<boolean> | boolean;
   askFollowUp(reportId: string, config: AiConfig, traces: AgentTrace[], diagnosis: string, history: FollowUpMessage[], question: string): Promise<string>;
   testAiConnection(config: AiConfig): Promise<string>;
@@ -116,11 +116,11 @@ export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
     return (await wasmAnalyzer()).executeTool(reportId, tool, args);
   },
 
-  async runAnalysis(reportId, config) {
+  async runAnalysis(reportId, config, onTrace) {
     if (isTauriRuntime()) {
-      return tauriAdapter.runAnalysis(reportId, config);
+      return tauriAdapter.runAnalysis(reportId, config, onTrace);
     }
-    return (await wasmAnalyzer()).runAnalysis(reportId, config);
+    return (await wasmAnalyzer()).runAnalysis(reportId, config, onTrace);
   },
 
   async cancelAnalysis(reportId) {

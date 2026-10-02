@@ -91,7 +91,8 @@ export interface SparkAnalyzerAdapter {
   loadTextReport(text: string, source?: string): Promise<LoadedReport>;
   fetchReport(input: string): Promise<LoadedReport>;
   executeTool(reportId: string, tool: string, args?: JsonRecord): Promise<unknown>;
-  runAnalysis(reportId: string, config: AiConfig): Promise<AnalysisResult>;
+  /** Emits traces during execution; the final result still contains the complete history. */
+  runAnalysis(reportId: string, config: AiConfig, onTrace?: (trace: AgentTrace) => void): Promise<AnalysisResult>;
   cancelAnalysis(reportId: string): Promise<boolean>;
   askFollowUp(
     reportId: string,
