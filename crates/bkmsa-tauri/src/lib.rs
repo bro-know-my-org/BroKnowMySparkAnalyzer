@@ -611,7 +611,7 @@ async fn analyzer_list_ai_models(
 ) -> Result<Vec<bkmsa_agent::ModelInfo>, String> {
     authorization.authorize(HostCapability::Network)?;
     authorization.authorize(HostCapability::Credentials)?;
-    let client = bkmsa_agent::OpenAiClient::new(resolve_ai_config(config).await?)
+    let client = bkmsa_agent::OpenAiClient::for_model_listing(resolve_ai_config(config).await?)
         .map_err(|error| error.to_string())?;
     client
         .list_models()

@@ -276,7 +276,7 @@ impl Analyzer {
     pub async fn list_ai_models(&self, config: JsValue) -> Result<JsValue, JsValue> {
         let config: bkmsa_agent::AiConfig =
             serde_wasm_bindgen::from_value(config).map_err(js_error)?;
-        config.validate().map_err(js_error)?;
+        config.validate_provider().map_err(js_error)?;
         let models = BrowserChatClient { config }
             .list_models()
             .await
@@ -386,6 +386,7 @@ impl BrowserChatClient {
 #[async_trait::async_trait(?Send)]
 impl bkmsa_agent::ChatClient for BrowserChatClient {
     async fn chat(&self, messages: &[bkmsa_agent::ChatMessage]) -> bkmsa_agent::Result<String> {
+        self.config.validate()?;
         let mut body = serde_json::json!({
             "model": self.config.model(),
             "messages": messages,
