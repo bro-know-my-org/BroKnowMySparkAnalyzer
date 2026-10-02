@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 
 const MAX_REPORT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TEXT_REPORT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PROTOBUF_FIELDS: usize = 250_000;
+// Packed sample times and child references each count toward this budget.
+// Real sampler reports can exceed 250,000 values even at only a few MiB.
+const MAX_PROTOBUF_FIELDS: usize = 2_000_000;
 
 #[derive(Clone, Copy)]
 enum WireSchema {
@@ -576,6 +578,53 @@ mod tests {
         let bytes = data.encode_to_vec();
         let r = parse_report_bytes(&bytes, "fixture", "profile").unwrap();
         assert_eq!(r.kind, ReportKind::Sampler);
+    }
+    #[test]
+    fn parses_large_sampler_with_many_stack_samples() {
+        let data = SamplerData {
+            metadata: Some(crate::proto::SamplerMetadata {
+                start_time: 123,
+                end_time: 600_123,
+                ..Default::default()
+            }),
+            threads: vec![crate::proto::ThreadNode {
+                name: "Server thread".into(),
+                children: (0..3_000)
+                    .map(|_| crate::proto::StackTraceNode {
+                        class_name: "example.Worker".into(),
+                        method_name: "tick".into(),
+                        times: vec![1.0; 100],
+                        ..Default::default()
+                    })
+                    .collect(),
+                times: vec![3_000.0; 100],
+                children_refs: (0..3_000).collect(),
+            }],
+            time_windows: (0..100).collect(),
+            ..Default::default()
+        };
+        let bytes = data.encode_to_vec();
+        let mut fields = 0;
+        assert!(scan_protobuf_message(&bytes, WireSchema::SamplerRoot, &mut fields).unwrap());
+        assert!(fields > 250_000);
+        for hint in ["", "application/x-spark-sampler"] {
+            let report = parse_report_bytes(&bytes, "large sampler", hint).unwrap();
+            assert_eq!(report.kind, ReportKind::Sampler);
+            assert_eq!(
+                report.raw["threads"][0]["children"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3_000
+            );
+            assert_eq!(
+                report.raw["threads"][0]["children"][0]["times"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                100
+            );
+        }
     }
     #[test]
     fn rejects_empty_wire_message() {
