@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod error;
 mod evidence;
+mod markdown;
 mod prompt;
 mod types;
 

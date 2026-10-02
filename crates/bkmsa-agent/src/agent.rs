@@ -418,68 +418,24 @@ fn has_required_final_sections(content: &str) -> bool {
         "# 还不能确定的点",
         "# 立刻执行",
     ];
-    let mut fence: Option<(char, usize)> = None;
-    let mut in_html_comment = false;
     let mut found = 0usize;
-    for line in content.lines() {
-        let indent = line.chars().take_while(|char| *char == ' ').count();
-        if indent > 3 || line.starts_with('\t') {
-            continue;
-        }
-        let trimmed = line[indent..].trim_end();
-        if let Some(marker) = trimmed
-            .chars()
-            .next()
-            .filter(|char| matches!(char, '`' | '~'))
-        {
-            let marker_len = trimmed.chars().take_while(|char| *char == marker).count();
-            if marker_len >= 3 {
-                match fence {
-                    None if marker != '`' || !trimmed[marker_len..].contains('`') => {
-                        fence = Some((marker, marker_len));
-                    }
-                    None => {}
-                    Some((open_marker, open_len))
-                        if marker == open_marker
-                            && marker_len >= open_len
-                            && trimmed[marker_len..].trim().is_empty() =>
-                    {
-                        fence = None;
-                    }
-                    _ => {}
-                }
-                continue;
+    let mut has_body = false;
+    for line in crate::markdown::visible_lines(content) {
+        if line.heading {
+            if !line.canonical
+                || found >= required.len()
+                || line.text.trim() != required[found]
+                || (found > 0 && !has_body)
+            {
+                return false;
             }
-        }
-        if fence.is_none() {
-            let mut cursor = 0usize;
-            let mut saw_comment_marker = false;
-            while cursor < trimmed.len() {
-                if in_html_comment {
-                    let Some(end) = trimmed[cursor..].find("-->") else {
-                        break;
-                    };
-                    saw_comment_marker = true;
-                    in_html_comment = false;
-                    cursor += end + 3;
-                } else {
-                    let Some(start) = trimmed[cursor..].find("<!--") else {
-                        break;
-                    };
-                    saw_comment_marker = true;
-                    in_html_comment = true;
-                    cursor += start + 4;
-                }
-            }
-            if in_html_comment || saw_comment_marker {
-                continue;
-            }
-        }
-        if fence.is_none() && found < required.len() && trimmed == required[found] {
             found += 1;
+            has_body = false;
+        } else if found > 0 && !line.text.trim().is_empty() {
+            has_body = true;
         }
     }
-    found == required.len()
+    found == required.len() && has_body
 }
 
 fn emit<F: FnMut(&AgentTrace)>(

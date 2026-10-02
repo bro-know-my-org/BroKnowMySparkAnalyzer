@@ -15,6 +15,7 @@ native-client = ["dep:reqwest"]
 [dependencies]
 async-trait = "0.1"
 bkmsa-core.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
