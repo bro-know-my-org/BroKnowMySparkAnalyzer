@@ -98,6 +98,7 @@ pub(crate) fn visible_lines(content: &str) -> impl Iterator<Item = Line<'_>> {
         .collect::<Vec<_>>();
     let mut containers = 0usize;
     let mut paragraph = None;
+    let mut in_code = false;
     for (event, range) in Parser::new(&cleaned).into_offset_iter() {
         let index = starts
             .partition_point(|start| *start <= range.start)
@@ -105,22 +106,41 @@ pub(crate) fn visible_lines(content: &str) -> impl Iterator<Item = Line<'_>> {
         match event {
             Event::Start(Tag::Paragraph) => paragraph = Some(index),
             Event::End(TagEnd::Paragraph) => paragraph = None,
+            Event::Start(Tag::Item) | Event::End(TagEnd::Item) => paragraph = None,
+            Event::Start(Tag::CodeBlock(_)) => {
+                paragraph = None;
+                in_code = true;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                paragraph = None;
+                in_code = false;
+            }
             Event::SoftBreak | Event::HardBreak => {
                 if let Some(line) = paragraph.and_then(|index| lines.get_mut(index)) {
                     line.text.to_mut().push(' ');
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) | Event::Start(Tag::List(_)) => containers += 1,
-            Event::End(TagEnd::BlockQuote(_)) | Event::End(TagEnd::List(_)) => containers -= 1,
-            Event::Start(Tag::Heading {
-                level: HeadingLevel::H1,
-                ..
-            }) if containers == 0 => {
-                if let Some(line) = lines.get_mut(index) {
-                    line.heading = true;
+            Event::Start(Tag::BlockQuote(_)) | Event::Start(Tag::List(_)) => {
+                paragraph = None;
+                containers += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_)) | Event::End(TagEnd::List(_)) => {
+                paragraph = None;
+                containers -= 1;
+            }
+            Event::End(TagEnd::Heading(_)) => paragraph = None,
+            Event::Start(Tag::Heading { level, .. }) => {
+                paragraph = None;
+                if level == HeadingLevel::H1 && containers == 0 {
+                    if let Some(line) = lines.get_mut(index) {
+                        line.heading = true;
+                    }
                 }
             }
             Event::Text(text) | Event::Code(text) => {
+                if !in_code {
+                    paragraph.get_or_insert(index);
+                }
                 if let Some(line) = paragraph.and_then(|index| lines.get_mut(index)) {
                     line.text.to_mut().push_str(&text);
                     continue;

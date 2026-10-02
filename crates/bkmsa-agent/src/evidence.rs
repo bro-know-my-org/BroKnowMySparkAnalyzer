@@ -1453,6 +1453,8 @@ mod tests {
             "# 优先处理\n将 X&#109;x 调整为 8G\n# 判断依据\n只有快照",
             "# 优先处理\n将 X**m**x 调整为 8G\n# 判断依据\n只有快照",
             "# 优先处理\n将 Xmx\n调整为 8G\n# 判断依据\n只有快照",
+            "# 优先处理\n- 将 Xmx\n  调整为 8G",
+            "# 优先处理\n- 先定位\n  - 将 Xmx\n    调整为 8G",
         ] {
             assert_eq!(validate_final(content, &state), Some(FinalProblem::UnverifiedHeapTuning), "{content}");
         }
@@ -1467,6 +1469,12 @@ mod tests {
             validate_final("# 优先处理\n不要\n调整 Xmx，先补采 GC 日志", &state),
             None
         );
+        for content in [
+            "# 优先处理\n- 不要\n  调整 Xmx",
+            "# 优先处理\n- 先补采\n  - 不要\n    调整 Xmx",
+        ] {
+            assert_eq!(validate_final(content, &state), None, "{content}");
+        }
         assert_eq!(
             validate_final(
                 "# 优先处理\n检查当前配置\n\n<div>将 Xmx 调整为 8G</div>\n\n",
