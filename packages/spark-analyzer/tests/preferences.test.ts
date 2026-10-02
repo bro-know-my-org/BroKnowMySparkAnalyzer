@@ -91,6 +91,10 @@ describe("host preferences concurrency", () => {
       const adapter = makeAdapter();
       adapter.loadApiKey.mockResolvedValue("current-endpoint-key");
       const view = mountView({ load: () => loading.promise, save: vi.fn() }, adapter);
+      if (field === "temperature") {
+        await view.wrapper.find(".ai-advanced .n-collapse-item__header-main").trigger("click");
+        await flushPromises();
+      }
       const control = field === "model"
         ? view.wrapper.findAllComponents(NSelect).find((item) => Boolean(item.props("tag")))!
         : view.wrapper.findComponent(NInputNumber);

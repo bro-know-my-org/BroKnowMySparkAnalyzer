@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import styles from "../src/styles.css?raw";
 import { toPng } from "html-to-image";
 import { renderDiagnosisImage } from "../src/image-export";
 
@@ -22,7 +20,7 @@ beforeEach(() => {
   // jsdom omits this constructor; the fixture contains no SVG image elements.
   vi.stubGlobal("SVGImageElement", class extends SVGElement {});
   const css = document.createElement("style");
-  css.textContent = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
+  css.textContent = styles;
   // WebKit serializes physical offsets as logical insets too; left alone is insufficient.
   css.textContent += "\n.image-export-node { inset-inline-start: -12000px; }";
   css.dataset.imageExportTest = "";

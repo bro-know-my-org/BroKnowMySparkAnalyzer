@@ -176,19 +176,22 @@ fn credential_entry(account: &str) -> Result<keyring::Entry, String> {
 mod credential_tests {
     use super::credential_entry;
     use std::process::{Command, Output};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const HELPER_ACTION: &str = "BKMSA_CREDENTIAL_TEST_ACTION";
     const HELPER_ACCOUNT: &str = "BKMSA_CREDENTIAL_TEST_ACCOUNT";
     const HELPER_PASSWORD: &str = "BKMSA_CREDENTIAL_TEST_PASSWORD";
+    static NEXT_ACCOUNT_ID: AtomicU64 = AtomicU64::new(0);
 
     fn unique_credential() -> (String, String) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
             .as_nanos();
+        let id = NEXT_ACCOUNT_ID.fetch_add(1, Ordering::Relaxed);
         (
-            format!("bkmsa-credential-test-{}-{unique}", std::process::id()),
+            format!("bkmsa-credential-test-{}-{unique}-{id}", std::process::id()),
             format!("test-secret-{unique}"),
         )
     }

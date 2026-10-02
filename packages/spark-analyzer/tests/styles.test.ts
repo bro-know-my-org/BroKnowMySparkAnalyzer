@@ -1,9 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-
-const styles = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/styles.css"), "utf8");
+import styles from "../src/styles.css?raw";
 
 afterEach(() => {
   document.head.querySelectorAll("[data-spark-style-test]").forEach((node) => node.remove());
