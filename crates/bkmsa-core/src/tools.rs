@@ -244,7 +244,22 @@ fn overview(r: &Report) -> Value {
     );
     m.insert("playerCount".into(), json!(r.summary.player_count));
     m.insert("entityCount".into(), json!(r.summary.entity_count));
-    json!({"source":r.source,"kind":r.kind,"title":r.summary.title,"platform":r.summary.platform,"generatedAt":r.summary.generated_at,"durationSeconds":r.summary.duration_seconds,"metrics":compact(m),"findings":r.summary.findings,"gc":r.summary.gc})
+    let sampling = (r.kind == crate::ReportKind::Sampler).then(|| {
+        let metadata = &r.raw["metadata"];
+        let mode = match &metadata["samplerMode"] {
+            Value::Number(v) if v.as_i64() == Some(1) => "allocation",
+            Value::String(v) if v.eq_ignore_ascii_case("allocation") => "allocation",
+            Value::Null => "execution", // protobuf default
+            Value::Number(v) if v.as_i64() == Some(0) => "execution",
+            Value::String(v) if v.eq_ignore_ascii_case("execution") => "execution",
+            _ => "unknown",
+        };
+        // Spark stores the slow-tick threshold in microseconds.
+        let threshold_ms = metadata["dataAggregator"]["tickLengthThreshold"]
+            .as_f64().map(|value| value / 1000.0);
+        json!({"mode":mode,"tickLengthThresholdMs":threshold_ms,"includedTicks":metadata["dataAggregator"]["numberOfIncludedTicks"],"totalTicks":metadata["numberOfTicks"]})
+    });
+    json!({"source":r.source,"kind":r.kind,"title":r.summary.title,"platform":r.summary.platform,"generatedAt":r.summary.generated_at,"durationSeconds":r.summary.duration_seconds,"sampling":sampling,"metrics":compact(m),"findings":r.summary.findings,"gc":r.summary.gc})
 }
 
 #[derive(Default)]
@@ -603,6 +618,20 @@ mod tests {
         assert_eq!(
             execute_tool(&r, "report_inventory", json!({})).unwrap()["kind"],
             "text"
+        );
+    }
+
+    #[test]
+    fn overview_exposes_sampler_scope() {
+        let report = Report {
+            kind: ReportKind::Sampler,
+            source: "fixture".into(),
+            summary: ReportSummary::default(),
+            raw: json!({"metadata":{"samplerMode":1,"dataAggregator":{"tickLengthThreshold":100000,"numberOfIncludedTicks":12},"numberOfTicks":2400}}),
+        };
+        assert_eq!(
+            execute_tool(&report, "overview", json!({})).unwrap()["sampling"],
+            json!({"mode":"allocation","tickLengthThresholdMs":100.0,"includedTicks":12,"totalTicks":2400})
         );
     }
 

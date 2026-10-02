@@ -145,6 +145,10 @@ fn gc_signals(name: &str, gc: &Value) -> Vec<Value> {
     let avg_time = f64_at(gc, "avgTime");
     let avg_frequency = f64_at(gc, "avgFrequency");
     let lower = name.to_lowercase();
+    // ZGC cycle duration includes concurrent work; JMX exposes pauses separately.
+    if lower.contains("cycles") && lower.contains("zgc") {
+        return vec![];
+    }
     let old_or_full = lower.contains("old") || lower.contains("full");
     let mut signals = vec![];
     if old_or_full && total > 0 && avg_time.is_some_and(|value| value >= 200.0) {
@@ -385,5 +389,18 @@ mod tests {
         assert_eq!(result["nonHeap"]["usedCommittedRatio"], 0.95);
         assert_eq!(result["pools"][0]["usage"]["usedCommittedRatio"], 0.93);
         assert!(result["nonHeap"]["usedMaxRatio"].is_null());
+    }
+
+    #[test]
+    fn zgc_cycle_duration_is_not_a_stop_the_world_pause() {
+        let r = report(json!({"metadata":{"systemStatistics":{"gc":{
+            "ZGC Cycles":{"total":100,"avgTime":668.0,"avgFrequency":1500.0},
+            "ZGC Pauses":{"total":300,"avgTime":0.03,"avgFrequency":5000.0}
+        }}}}));
+        assert!(summarize_memory_gc(&r)["signals"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(!gc_signals("ZGC Pauses", &json!({"total":2,"avgTime":300.0})).is_empty());
     }
 }
