@@ -4,10 +4,13 @@ use serde_json::Value;
 
 #[derive(Debug, Default)]
 pub(crate) struct EvidenceState {
+    pub heap_only: bool,
+    pub filtered_ticks: bool,
     pub mod_sources_resolved: bool,
     pub mod_source_names: Vec<String>,
     pub hot_path_sources_resolved: bool,
     pub hot_path_source_names: Vec<String>,
+    pub hot_path_max_source_percent: Option<f64>,
     pub hot_path_entity_candidates: Vec<String>,
     pub entity_chunk_names: Vec<String>,
     pub hot_path_text: String,
@@ -25,6 +28,9 @@ pub(crate) enum FinalProblem {
     OmitsMajorCategory,
     OverstatesGcCorrelation,
     WeakConclusion,
+    UnverifiedHeapTuning,
+    InfersBottleneckFromTotalCpu,
+    UnsupportedCertainty,
 }
 
 impl FinalProblem {
@@ -47,13 +53,16 @@ impl FinalProblem {
                 state.selected_hot_path_categories.join(", ")
             ),
             Self::OmitsMajorCategory => format!(
-                "最终回答把多个显著类别压缩成单一主因。# 结论第一段必须以“主导项 + 其他显著贡献项”覆盖：[{}]，并逐项列出百分比。",
+                "回答尚未完整覆盖主要负载或其占比，补充关键依据：[{}]。结论只需点明处理方向，可在判断依据中解释路径和占比；父子类别可能重叠，不能相加或当作独立根因。",
                 state.major_hotspot_categories.iter().enumerate().map(|(index, category)| {
                     state.major_hotspot_percentages.get(index).map_or_else(|| category.clone(), |percent| format!("{category} {percent:.1}%"))
                 }).collect::<Vec<_>>().join(", ")
             ),
             Self::OverstatesGcCorrelation => "GC 聚合统计没有与 worst_windows 做时间戳对齐，只能作为异常风险或待验证项；不得写成已证实导致/加剧 tick 尖峰。".into(),
             Self::WeakConclusion => "回答仍然过于泛化。继续调用最能缩小范围的工具；若报告无法精确定位，明确写“当前报告无法唯一定位”并给出补采要求，禁止用泛泛的“可能原因”收口。".into(),
+            Self::UnverifiedHeapTuning => "只有 heap 快照，尚无 CPU 调用树与 GC/tick 时间对齐证据。优先处理必须先补普通 CPU profile、GC 时间日志并核实宿主换页；删除直接调整堆/新生代的操作与精确参数值。环境配置仅可作为待验证线索，不能证明当前 tick 根因。".into(),
+            Self::InfersBottleneckFromTotalCpu => "总进程/系统 CPU 较低不能排除主线程单核瓶颈，也不能证明瓶颈是暂停型。heap 报告没有 CPU 树，仅凭 MSPT 不能证明是执行开销或逐 tick 都繁忙。删除这类判断；根据主线程调用树和带时间戳的暂停证据确定方向。".into(),
+            Self::UnsupportedCertainty => format!("删去无充分证据的确定判断：聚合指标或最差窗口节选不能证明全程稳定/全程无恢复；低堆占用或平均 GC 正常不能排除内存因素；低总 CPU 不能证明单核跑满。改为实际观察到的范围和指标。{}", if state.filtered_ticks { "本报告只采慢 tick，不能称为普通采样；复测优先采普通 profile，二者占比不能直接比较。" } else { "" }),
         }
     }
 }
@@ -62,6 +71,34 @@ pub(crate) fn update(state: &mut EvidenceState, tool: &str, result: &Value) {
     let Some(object) = result.as_object() else {
         return;
     };
+    if tool == "overview" {
+        state.filtered_ticks = result
+            .pointer("/sampling/tickLengthThresholdMs")
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v > 0.0);
+    }
+    if tool == "hotspot_groups" {
+        let mut categories = result["byCategory"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some((
+                    item["category"].as_str()?.to_owned(),
+                    item["maxPercent"].as_f64()?,
+                ))
+            })
+            .filter(|(category, _)| is_priority_category(category))
+            .collect::<Vec<_>>();
+        categories.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let dominant = categories.first().map_or(0.0, |item| item.1);
+        categories.retain(|(_, percent)| {
+            *percent >= 10.0 || (dominant > 0.0 && *percent >= dominant * 0.25)
+        });
+        categories.truncate(8);
+        state.major_hotspot_categories = categories.iter().map(|item| item.0.clone()).collect();
+        state.major_hotspot_percentages = categories.into_iter().map(|item| item.1).collect();
+    }
     if tool == "diagnostic_hypotheses" {
         let major = object
             .get("categoryLoadProfile")
@@ -120,12 +157,20 @@ pub(crate) fn update(state: &mut EvidenceState, tool: &str, result: &Value) {
             .and_then(Value::as_array)
         {
             for item in items {
+                let count = sources.len();
                 add_source(item, "sourceId", "sourceName", &mut sources);
+                if sources.len() > count {
+                    record_source_percent(state, item.get("maxPercent"));
+                }
             }
         }
         if let Some(items) = object.get("callChains").and_then(Value::as_array) {
             for item in items {
+                let count = sources.len();
                 add_source(item, "terminalSourceId", "terminalSourceName", &mut sources);
+                if sources.len() > count {
+                    record_source_percent(state, item.get("terminalPercent"));
+                }
             }
         }
         state.hot_path_source_names.extend(sources);
@@ -184,7 +229,147 @@ pub(crate) fn update(state: &mut EvidenceState, tool: &str, result: &Value) {
     }
 }
 
+fn record_source_percent(state: &mut EvidenceState, value: Option<&Value>) {
+    if let Some(percent) = value.and_then(Value::as_f64) {
+        let previous = state.hot_path_max_source_percent.unwrap_or(0.0);
+        state.hot_path_max_source_percent = Some(previous.max(percent));
+    }
+}
+
 pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<FinalProblem> {
+    if state.filtered_ticks
+        && contains_any(
+            content,
+            &["本次普通采样", "本报告普通采样", "本次为普通采样"],
+        )
+    {
+        return Some(FinalProblem::UnsupportedCertainty);
+    }
+    if factual_sections(content)
+        .split(['。', '\n', '；'])
+        .any(|sentence| {
+            (contains_any(
+                sentence,
+                &[
+                    "TPS 全程稳定",
+                    "全程无恢复窗口",
+                    "近期在变差",
+                    "单核跑满",
+                    "单线程被加速逻辑占满",
+                ],
+            ) || (contains_any(sentence, &["内存", "GC"])
+                && contains_any(sentence, &["排除", "不是本次瓶颈", "不是主因"])))
+                && !contains_any(
+                    sentence,
+                    &[
+                        "不能",
+                        "无法",
+                        "不要",
+                        "不代表",
+                        "未确认",
+                        "不足以",
+                        "不排除",
+                    ],
+                )
+        })
+    {
+        return Some(FinalProblem::UnsupportedCertainty);
+    }
+    if content.split(['。', '\n']).any(|sentence| {
+        sentence.to_ascii_lowercase().contains("cpu")
+            && contains_any(
+                sentence,
+                &["不是算力打满", "说明瓶颈是停顿", "不是内存或硬件瓶颈"],
+            )
+            && !contains_any(sentence, &["不能排除", "不能说明", "不代表"])
+    }) {
+        return Some(FinalProblem::InfersBottleneckFromTotalCpu);
+    }
+    if state.heap_only
+        && content.split(['。', '\n']).any(|sentence| {
+            contains_any(
+                sentence,
+                &["属于持续性 CPU 开销", "说明每个 tick", "瓶颈在主线程执行"],
+            ) && !contains_any(sentence, &["不能", "无法", "不代表"])
+        })
+    {
+        return Some(FinalProblem::InfersBottleneckFromTotalCpu);
+    }
+    let actions = content.split_once("# 优先处理").map_or("", |(_, tail)| {
+        tail.split_once("# 判断依据")
+            .map_or(tail, |(actions, _)| actions)
+    });
+    let tuning_targets = [
+        "G1NewSizePercent",
+        "G1MaxNewSizePercent",
+        "MaxTenuringThreshold",
+        "swap",
+        "Xmx",
+        "Xms",
+        "新生代",
+        "年轻代",
+    ];
+    let tuning_actions = [
+        "改为",
+        "设为",
+        "设置为",
+        "调整",
+        "调高",
+        "调低",
+        "调大",
+        "调小",
+        "降低",
+        "降到",
+        "缩小",
+        "收缩",
+        "扩大",
+        "增大",
+        "上调",
+        "下调",
+        "移除",
+        "禁用",
+        "删除",
+        "恢复默认",
+        "可试",
+    ];
+    let actions = actions
+        .replace("但", "\n")
+        .replace("而", "\n")
+        .replace("并把", "\n把")
+        .replace("并将", "\n将");
+    if state.heap_only
+        && actions
+            .split(['。', '\n', '；', '，', ',', ';'])
+            .any(|clause| {
+                if !contains_any(clause, &tuning_targets) {
+                    return false;
+                }
+                let mut changes = tuning_actions
+                    .iter()
+                    .flat_map(|action| {
+                        clause
+                            .match_indices(action)
+                            .map(|(at, _)| (at, at + action.len()))
+                    })
+                    .collect::<Vec<_>>();
+                changes.sort_unstable();
+                let mut previous_end = 0;
+                changes.into_iter().any(|(at, end)| {
+                    if at < previous_end {
+                        return false;
+                    }
+                    let prefix = &clause[previous_end..at];
+                    previous_end = end;
+                    !prefix.ends_with('不')
+                        && !contains_any(
+                            prefix,
+                            &["不要", "不建议", "不能", "先不", "暂不", "不再", "无法"],
+                        )
+                })
+            })
+    {
+        return Some(FinalProblem::UnverifiedHeapTuning);
+    }
     if denies_resolved_sources(content, state) {
         return Some(FinalProblem::DeniesResolvedSources);
     }
@@ -221,6 +406,7 @@ fn denies_resolved_sources(content: &str, state: &EvidenceState) -> bool {
                 "所有帧均为 unknown",
                 "无模组来源可解析帧",
                 "无法解析任何模组来源",
+                "未解析出任何插件热点帧",
                 "no mod sources",
                 "all unknown",
             ],
@@ -257,8 +443,10 @@ fn downplays_hot_path(content: &str, state: &EvidenceState) -> bool {
                         )
                 })
         });
-    omits_sources
-        || omits_entities
+    let significant = state
+        .hot_path_max_source_percent
+        .is_none_or(|percent| percent >= 1.0);
+    (significant && (omits_sources || omits_entities))
         || dismisses_candidate
         || contains_any(
             content,
@@ -318,6 +506,14 @@ fn affirmative_entity_causation(clause: &str) -> bool {
 }
 
 fn overstates_gc(content: &str) -> bool {
+    if content.split(['。', '\n', '；']).any(|sentence| {
+        let lower = sentence.to_ascii_lowercase();
+        lower.contains("gc")
+            && sentence.contains("足以解释")
+            && !has_matching_gc_causation_negation(sentence)
+    }) {
+        return true;
+    }
     content
         .split(['。', '！', '？', '\n', '；', ';', '，', ','])
         .any(|clause| {
@@ -336,8 +532,12 @@ fn overstates_gc(content: &str) -> bool {
                         "是 tick 尖峰的主因",
                         "引发了卡顿",
                         "引发卡顿",
+                        "足以解释",
                     ],
-                ) || contains_any(&lower, &["root cause", "caused the spike"]))
+                ) || contains_any(
+                    &lower,
+                    &["root cause", "caused the spike", "full gc 抖动状态"],
+                ))
                 && !has_matching_gc_causation_negation(clause)
         })
 }
@@ -355,17 +555,23 @@ fn has_matching_gc_causation_negation(clause: &str) -> bool {
         "是 tick 尖峰的主因",
         "引发了卡顿",
         "引发卡顿",
+        "足以解释",
     ]
     .iter()
     .flat_map(|needle| clause.match_indices(needle).map(|(index, _)| index))
     .chain(
-        ["root cause", "caused the spike"]
+        ["root cause", "caused the spike", "full gc 抖动状态"]
             .iter()
             .flat_map(|needle| find_all_ascii_phrases(&lower, needle)),
     )
     .collect::<Vec<_>>();
     causals.sort_unstable();
+    // These two templates overlap within one assertion, not two claims.
+    causals.dedup_by(|later, earlier| {
+        *later == *earlier + "足以".len() && clause[*earlier..].starts_with("足以解释尖峰")
+    });
     let negations = [
+        "不足以",
         "不能证明",
         "无法证明",
         "未证明",
@@ -461,39 +667,40 @@ fn find_all_ascii_phrases(content: &str, phrase: &str) -> Vec<usize> {
 }
 
 fn omits_selected_category(content: &str, state: &EvidenceState) -> bool {
-    let conclusion = conclusion_lead(content);
     state
         .selected_hot_path_categories
         .iter()
         .filter(|category| is_priority_category(category))
-        .any(|category| !mentions_category(conclusion, category))
+        .any(|category| !mentions_category(content, category))
 }
 
 fn omits_major_category(content: &str, state: &EvidenceState) -> bool {
-    let conclusion = conclusion_lead(content);
+    let facts = factual_sections(content);
+    let conclusion = facts.as_str();
     let required: Vec<_> = state
         .major_hotspot_categories
         .iter()
         .enumerate()
-        .filter(|(_, category)| is_priority_category(category))
+        .filter(|(_, category)| {
+            is_priority_category(category)
+                && (category.as_str() != "world_tick"
+                    || !state
+                        .major_hotspot_categories
+                        .iter()
+                        .any(|c| c != "world_tick" && is_priority_category(c)))
+        })
         .collect();
-    if required.len() <= 1 {
+    if required.is_empty() {
         return false;
     }
     if required
         .iter()
-        .any(|(_, category)| !mentions_category(conclusion, category))
+        .any(|(_, category)| !mentions_category(content, category))
     {
         return true;
     }
-    let dominant_position = category_position(conclusion, required[0].1).unwrap_or(usize::MAX);
-    if required
-        .iter()
-        .skip(1)
-        .filter_map(|(_, category)| category_position(conclusion, category))
-        .any(|position| position < dominant_position)
-    {
-        return true;
+    if !conclusion.contains('%') {
+        return false;
     }
     if conclusion.contains("分别") {
         let percentages = extract_percentages(conclusion);
@@ -661,22 +868,10 @@ fn extract_percentages(content: &str) -> Vec<f64> {
         .collect()
 }
 
+#[cfg(test)]
 fn conclusion_lead(content: &str) -> &str {
-    let before_evidence = content
-        .split_once("# 证据链")
-        .map_or(content, |(conclusion, _)| conclusion);
-    let heading = "# 结论";
-    let section_start = before_evidence
-        .match_indices(heading)
-        .find(|(index, _)| {
-            (*index == 0 || before_evidence.as_bytes().get(index - 1) == Some(&b'\n'))
-                && before_evidence
-                    .as_bytes()
-                    .get(index + heading.len())
-                    .is_none_or(|byte| matches!(byte, b'\r' | b'\n' | b' '))
-        })
-        .map_or(0, |(index, _)| index + heading.len());
-    let lead = before_evidence[section_start..].trim_start();
+    let before_evidence = conclusion_section(content);
+    let lead = before_evidence.trim_start();
     let end = ["\r\n\r\n", "\n\n"]
         .iter()
         .filter_map(|separator| lead.find(separator))
@@ -685,10 +880,45 @@ fn conclusion_lead(content: &str) -> &str {
     &lead[..end]
 }
 
+fn conclusion_section(content: &str) -> &str {
+    let heading = "# 结论";
+    let section_start = content
+        .match_indices(heading)
+        .find(|(index, _)| {
+            (*index == 0 || content.as_bytes().get(index - 1) == Some(&b'\n'))
+                && content
+                    .as_bytes()
+                    .get(index + heading.len())
+                    .is_none_or(|byte| matches!(byte, b'\r' | b'\n' | b' '))
+        })
+        .map_or(0, |(index, _)| index + heading.len());
+    let section = &content[section_start..];
+    section
+        .split_once("\n# ")
+        .map_or(section, |(conclusion, _)| conclusion)
+}
+
+fn factual_sections(content: &str) -> String {
+    let mut factual = true;
+    let mut output = String::new();
+    for line in content.lines() {
+        match line.trim() {
+            "# 优先处理" | "# 复测与补采" | "# 立刻执行" => factual = false,
+            "# 结论" | "# 判断依据" | "# 证据链" | "# 排除项" | "# 还不能确定的点" => {
+                factual = true
+            }
+            _ => {}
+        }
+        if factual {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
 fn looks_weak(content: &str) -> bool {
-    let content = content
-        .split_once("# 证据链")
-        .map_or(content, |(conclusion, _)| conclusion);
+    let content = conclusion_section(content);
     let count = [
         "可能原因",
         "可能",
@@ -717,11 +947,7 @@ fn is_priority_category(category: &str) -> bool {
 }
 
 fn mentions_category(content: &str, category: &str) -> bool {
-    category_aliases(category).is_some_and(|aliases| {
-        aliases
-            .iter()
-            .any(|alias| !alias_positions(content, alias).is_empty())
-    })
+    category_position(content, category).is_some()
 }
 
 fn category_position(content: &str, category: &str) -> Option<usize> {
@@ -744,8 +970,10 @@ fn category_position(content: &str, category: &str) -> Option<usize> {
 }
 
 fn alias_positions(content: &str, alias: &str) -> Vec<usize> {
-    content
-        .match_indices(alias)
+    let searchable = content.to_ascii_lowercase();
+    let alias = alias.to_ascii_lowercase();
+    searchable
+        .match_indices(&alias)
         .filter_map(|(index, _)| {
             if !alias.is_ascii() {
                 return Some(index);
@@ -770,13 +998,28 @@ fn category_aliases(category: &str) -> Option<&'static [&'static str]> {
         ],
         "chunk_task" => &[
             "chunk_task",
+            "chunk task",
             "区块任务",
+            "区块调度",
             "区块加载",
             "ChunkMap",
             "ServerChunkCache",
         ],
-        "entity_tick" => &["entity_tick", "实体 tick", "实体tick", "EntityTickList"],
-        "world_tick" => &["world_tick", "世界 tick", "world tick", "ServerLevel"],
+        "entity_tick" => &[
+            "entity_tick",
+            "entity tick",
+            "实体 tick",
+            "实体tick",
+            "实体更新",
+            "EntityTickList",
+        ],
+        "world_tick" => &[
+            "world_tick",
+            "世界 tick",
+            "世界更新",
+            "world tick",
+            "ServerLevel",
+        ],
         "commands" => &["commands", "命令", "CommandFunction"],
         "entity_ai_pathfinding" => &[
             "entity_ai_pathfinding",
@@ -785,7 +1028,7 @@ fn category_aliases(category: &str) -> Option<&'static [&'static str]> {
             "GoalSelector",
             "PathNavigation",
         ],
-        "io" => &["I/O", "i/o", "文件读写", "磁盘读写"],
+        "io" => &["io", "I/O", "文件读写", "磁盘读写", "写盘", "文件写入"],
         _ => return None,
     };
     Some(aliases)
@@ -945,7 +1188,7 @@ mod tests {
         );
         assert_eq!(
             validate_final("# 结论\n实体 tick 与区块任务均显著", &state),
-            Some(FinalProblem::OmitsMajorCategory)
+            None
         );
         assert_eq!(
             validate_final("# 结论\n实体 tick 18.2%，区块任务 42.4%", &state),
@@ -1101,6 +1344,152 @@ mod tests {
             validate_final("GC 导致尖峰", &EvidenceState::default()),
             Some(FinalProblem::OverstatesGcCorrelation)
         );
+    }
+
+    #[test]
+    fn permits_read_only_heap_checks_and_gc_exclusion_experiments() {
+        let state = EvidenceState {
+            heap_only: true,
+            ..Default::default()
+        };
+        let check = |text: &str| validate_final(text, &state);
+        for action in [
+            "检查 swap 设置并核实宿主换页活动",
+            "建议先核实 swap 占用来自哪个进程",
+            "检查 Xmx 设置并记录当前值",
+            "补采 GC 日志，以排除 GC 停顿是否参与尖峰",
+        ] {
+            assert_eq!(
+                check(&format!(
+                    "# 结论\n需要补采\n# 优先处理\n{action}\n# 判断依据\n只有堆快照"
+                )),
+                None,
+                "{action}"
+            );
+        }
+        assert_eq!(
+            check("# 优先处理\n将 Xmx 设置为 8G\n# 判断依据\n只有堆快照"),
+            Some(FinalProblem::UnverifiedHeapTuning)
+        );
+        assert_eq!(
+            check("# 判断依据\n可以排除内存因素"),
+            Some(FinalProblem::UnsupportedCertainty)
+        );
+        assert_eq!(
+            check("处于 fUlL gC 抖动状态"),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(check("不能证明处于 FULL gC 抖动状态"), None);
+        assert_eq!(check("未证明 GC 足以解释尖峰"), None);
+        for action in [
+            "不要调整 Xmx，先把 G1NewSizePercent 改为 20",
+            "不要调整 Xmx且把 G1NewSizePercent 改为 20",
+        ] {
+            assert_eq!(
+                check(&format!("# 优先处理\n{action}\n# 判断依据\n只有快照")),
+                Some(FinalProblem::UnverifiedHeapTuning)
+            );
+        }
+    }
+
+    #[test]
+    fn heap_snapshot_does_not_justify_prescribing_new_generation_sizes() {
+        let state = EvidenceState {
+            heap_only: true,
+            ..Default::default()
+        };
+        assert_eq!(validate_final("# 结论\n堆有余量\n# 优先处理\n可试 G1NewSizePercent=20、G1MaxNewSizePercent=30\n# 判断依据\nYoung GC 平均 74ms", &state), Some(FinalProblem::UnverifiedHeapTuning));
+        assert_eq!(validate_final("# 结论\n需要 CPU 与 GC 时间证据\n# 优先处理\n先不缩小新生代，补普通 CPU profile 与 GC 日志\n# 判断依据\n当前没有时间对齐数据", &state), None);
+        assert_eq!(
+            validate_final(
+                "进程与系统 CPU 均约 20%，不是算力打满，更像停顿型卡顿",
+                &state
+            ),
+            Some(FinalProblem::InfersBottleneckFromTotalCpu)
+        );
+        assert_eq!(
+            validate_final("进程 CPU 约 20%，不能排除主线程单核瓶颈", &state),
+            None
+        );
+        assert_eq!(
+            validate_final("MSPT 50ms 属于持续性 CPU 开销", &state),
+            Some(FinalProblem::InfersBottleneckFromTotalCpu)
+        );
+        assert_eq!(
+            validate_final("Old GC 足以解释千毫秒级 MSPT", &EvidenceState::default()),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+        assert_eq!(
+            validate_final("Old GC 不足以解释全部卡顿", &EvidenceState::default()),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "GC 聚合：Old 收集一次，1575ms，量级足以解释尖峰",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+    }
+
+    #[test]
+    fn conclusion_checks_do_not_read_actions_as_conclusion() {
+        let content = "# 结论\n实体 tick 40%\n# 优先处理\n区块任务 20% 可能需要进一步确认\n# 判断依据\n证据\n# 复测与补采\n对照";
+        assert_eq!(conclusion_lead(content), "实体 tick 40%");
+        assert!(!looks_weak(content));
+        let state = EvidenceState {
+            major_hotspot_categories: vec!["entity_tick".into(), "chunk_task".into()],
+            major_hotspot_percentages: vec![40.0, 20.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_final(content, &state),
+            Some(FinalProblem::OmitsMajorCategory)
+        );
+    }
+
+    #[test]
+    fn selected_category_can_be_explained_in_evidence_without_crowding_the_lead() {
+        let state = EvidenceState {
+            filtered_ticks: true,
+            selected_hot_path_categories: vec!["chunk_task".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_final(
+                "# 结论\n暂未见持续过载\n# 判断依据\n区块任务占比 1%，当前绝对耗时很低",
+                &state
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final("# 结论\n暂未见持续过载", &state),
+            Some(FinalProblem::OmitsSelectedCategory)
+        );
+        assert_eq!(
+            validate_final("本次普通采样", &state),
+            Some(FinalProblem::UnsupportedCertainty)
+        );
+    }
+
+    #[test]
+    fn natural_category_names_and_low_cost_sources_do_not_force_false_suspects() {
+        let state = EvidenceState {
+            major_hotspot_categories: vec![
+                "world_tick".into(),
+                "entity_tick".into(),
+                "chunk_task".into(),
+            ],
+            major_hotspot_percentages: vec![100.0, 61.7, 27.2],
+            selected_hot_path_categories: vec!["io".into()],
+            hot_path_sources_resolved: true,
+            hot_path_source_names: vec!["CoreProtect".into()],
+            hot_path_max_source_percent: Some(0.007),
+            ..Default::default()
+        };
+        assert_eq!(validate_final("# 结论\nWorld tick 100%，实体更新 61.7%，chunk task 27.2%\n# 判断依据\n压缩写盘占 25%", &state), None);
+        assert!(!mentions_category("configuration 25%", "io"));
+        assert!(mentions_category("IO 25%", "io"));
     }
 
     #[test]
@@ -1324,6 +1713,23 @@ mod tests {
             },
         };
         let mut state = EvidenceState::default();
+        let groups = execute_tool(&report, "hotspot_groups", json!({})).unwrap();
+        update(&mut state, "hotspot_groups", &groups);
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体 tick 与区块任务繁忙\n# 判断依据\n实体 tick 15%，区块任务 30%",
+                &state
+            ),
+            Some(FinalProblem::OmitsMajorCategory)
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n实体更新为主，区块任务次之\n# 判断依据\n实体 tick 30%，区块任务 15%",
+                &state
+            ),
+            None
+        );
+        assert_eq!(validate_final("# 结论\n实体更新为主，区块任务次之\n# 优先处理\n实体更新：在副本将实体数量减少 50%\n# 判断依据\n实体更新占 30%，区块任务占 15%", &state), None);
         for tool in ["mod_sources", "entity_chunks", "diagnostic_hypotheses"] {
             let result = execute_tool(&report, tool, json!({})).expect("core tool must execute");
             update(&mut state, tool, &result);
