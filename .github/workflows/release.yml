@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to recover
+        required: true
+        type: string
+      source_run_id:
+        description: Completed tag release run with successful CI and builds
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +28,7 @@ concurrency:
 jobs:
   prepare:
     name: Validate release version
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -250,7 +261,6 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     permissions:
       contents: read
       id-token: write
@@ -277,5 +287,116 @@ jobs:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: BroKnowMySparkAnalyzer ${{ needs.prepare.outputs.version }}
+          draft: false
           files: release-assets/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  recover-prepare:
+    name: Validate release recovery
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.recovery.outputs.tag }}
+      version: ${{ steps.recovery.outputs.version }}
+      sha: ${{ steps.recovery.outputs.sha }}
+      run_id: ${{ steps.recovery.outputs.run_id }}
+    steps:
+      - name: Checkout existing release tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify source run, CI, builds, and draft release
+        id: recovery
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          [[ "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "Recovery requires an existing stable release tag" >&2
+            exit 1
+          }
+          [[ "${SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || {
+            echo "Source run ID must be a positive integer" >&2
+            exit 1
+          }
+          TAG_SHA="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          test "$(git rev-parse HEAD)" = "${TAG_SHA}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" > source-run.json
+          jq -e --arg tag "${RELEASE_TAG}" --arg sha "${TAG_SHA}" '
+            .event == "push" and .path == ".github/workflows/release.yml"
+            and .head_branch == $tag and .head_sha == $sha and .status == "completed"
+          ' source-run.json
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/jobs?per_page=100" > source-jobs.json
+          jq -e '
+            .jobs as $jobs | [
+              "Validate release version",
+              "Run release CI gate / verify",
+              "Run release CI gate / Check native crates on windows-latest",
+              "Run release CI gate / Check native crates on macos-latest",
+              "Build windows x64", "Build linux x64", "Build macos x64", "Build macos arm64"
+            ] | all(.[]; . as $name | any($jobs[]; .name == $name and .conclusion == "success"))
+          ' source-jobs.json
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" > source-artifacts.json
+          jq -e '
+            .artifacts as $artifacts | [
+              "release-assets-windows-x64", "release-assets-linux-x64",
+              "release-assets-macos-x64", "release-assets-macos-arm64"
+            ] | all(.[]; . as $name | any($artifacts[]; .name == $name and .expired == false))
+          ' source-artifacts.json
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --json tagName,isDraft \
+            | jq -e --arg tag "${RELEASE_TAG}" '.tagName == $tag and .isDraft == true'
+          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${RELEASE_TAG#v}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${TAG_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "run_id=${SOURCE_RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+  recover-packages:
+    name: Recover SDK publishing
+    needs: recover-prepare
+    uses: ./.github/workflows/publish-npm.yml
+    with:
+      version: ${{ needs.recover-prepare.outputs.version }}
+      ref: ${{ needs.recover-prepare.outputs.sha }}
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
+
+  recover-release:
+    name: Publish recovered GitHub Release
+    needs: [recover-prepare, recover-packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download previously verified release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+          run-id: ${{ needs.recover-prepare.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish recovered release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.recover-prepare.outputs.tag }}
+          target_commitish: ${{ needs.recover-prepare.outputs.sha }}
+          name: BroKnowMySparkAnalyzer ${{ needs.recover-prepare.outputs.version }}
+          draft: false
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -239,16 +239,29 @@ const adapter = createTauriSparkAnalyzerAdapter();
 
 ### 发布资产
 
-推送 tag 前必须先把 workspace 版本更新为目标版本。`Publish SDK Packages` workflow 会按依赖顺序发布 `bkmsa-core`、`bkmsa-agent`、`bkmsa-tauri`、`bkmsa-cli`，然后发布同版本的 `@bro-know-my/spark-analyzer`。仓库 Actions secrets 需要：
+推送 tag 前必须先把 workspace 版本更新为目标版本。`Publish SDK Packages` workflow 会按依赖顺序发布 `bkmsa-core`、`bkmsa-agent`、`bkmsa-tauri`、`bkmsa-cli`，然后发布同版本的 `@bro-know-my/spark-analyzer`。Actions secrets 只需要：
 
 ```text
 CARGO_REGISTRY_TOKEN  crates.io 发布 token
-NPM_TOKEN             npm 发布 token
 ```
+
+npm 使用 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) 的 OIDC 身份发布，不需要 `NPM_TOKEN`。在 npm 包的 Settings → Trusted Publisher 中选择 GitHub Actions，填写：
+
+| 字段 | 值 |
+| --- | --- |
+| Organization or user | `bro-know-my-org` |
+| Repository | `BroKnowMySparkAnalyzer` |
+| Workflow filename | `release.yml` |
+| Environment name | 留空 |
+| Allowed actions | 允许 `npm publish` |
+
+信任的是调用方 `release.yml`，不是可复用工作流 `publish-npm.yml`。两层工作流都已授予 `id-token: write`；发布任务使用 npm 11.19.0。新建信任配置时需明确允许直接发布，否则只允许暂存发布。
 
 首次 `cargo publish` 会自动创建 crate，不需要在 crates.io 手动建包。首次发布后可以把 token 收紧到这四个 crate，或迁移到 crates.io Trusted Publishing。crate 版本不可覆盖；workflow 支持安全重跑并跳过已经存在的同版本包。
 
-推送到 `master` 会在 WASM smoke test 和 Web 构建成功后更新 GitHub Pages。推送严格的 `vX.Y.Z` tag（或手动触发 Release workflow）会先校验已提交版本并运行完整 CI，再构建 Windows、Linux 和 macOS 桌面包及原生 CLI；随后发布 Rust/npm SDK、部署网页并创建 GitHub Release。版本 `0.1.1` 的预期资产示例：
+推送到 `master` 会在 WASM smoke test 和 Web 构建成功后更新 GitHub Pages。推送严格的 `vX.Y.Z` tag 会先校验已提交版本并运行完整 CI，再构建 Windows、Linux 和 macOS 桌面包及原生 CLI；随后发布 Rust/npm SDK、部署网页并创建 GitHub Release。
+
+如果发布阶段失败，可在 `master` 上手动触发 Release workflow，填写现有 `release_tag` 和原 tag 发版任务的 `source_run_id`。恢复入口核对 tag 提交、原任务的版本/CI/四平台构建结果、未过期的四组产物和 Release 草稿，再发布 SDK 并复用原产物完成 GitHub Release；不会移动 tag 或重建桌面包。版本 `0.1.1` 的预期资产示例：
 
 ```text
 bkmsa-0.1.1-windows-x64.exe
@@ -505,16 +518,29 @@ Private real-world reports are optional local regression inputs and must not be 
 
 ### Release assets
 
-Before pushing a tag, update the workspace version to the intended release. The `Publish SDK Packages` workflow publishes `bkmsa-core`, `bkmsa-agent`, `bkmsa-tauri`, and `bkmsa-cli` in dependency order, followed by the matching `@bro-know-my/spark-analyzer` npm version. Configure these Actions secrets:
+Before pushing a tag, update the workspace version to the intended release. The `Publish SDK Packages` workflow publishes `bkmsa-core`, `bkmsa-agent`, `bkmsa-tauri`, and `bkmsa-cli` in dependency order, followed by the matching `@bro-know-my/spark-analyzer` npm version. Only this Actions secret is required:
 
 ```text
 CARGO_REGISTRY_TOKEN  crates.io publishing token
-NPM_TOKEN             npm publishing token
 ```
+
+npm uses OIDC [Trusted Publishing](https://docs.npmjs.com/trusted-publishers), without `NPM_TOKEN`. In the npm package's Settings → Trusted Publisher, select GitHub Actions and configure:
+
+| Field | Value |
+| --- | --- |
+| Organization or user | `bro-know-my-org` |
+| Repository | `BroKnowMySparkAnalyzer` |
+| Workflow filename | `release.yml` |
+| Environment name | Leave empty |
+| Allowed actions | Allow `npm publish` |
+
+Trust the calling workflow `release.yml`, rather than the reusable `publish-npm.yml`. Both workflows grant `id-token: write`, and the publish job uses npm 11.19.0. Explicitly allow direct publishing when creating the trusted publisher; otherwise only staged publishing is allowed.
 
 The first `cargo publish` creates each crate automatically; no manual crates.io package creation is needed. After bootstrapping, restrict the token to these four crates or migrate to crates.io Trusted Publishing. Published versions cannot be overwritten. The workflow is rerunnable and skips matching versions that already exist.
 
-Pushing to `master` updates GitHub Pages after the WASM smoke test and Web build succeed. Pushing a strict `vX.Y.Z` tag (or manually dispatching the Release workflow) first validates committed versions and runs the full CI gate, then builds desktop packages and native CLIs for Windows, Linux, and macOS. Rust/npm SDK publication, Web deployment, and the GitHub Release follow only after those gates pass. Expected assets for version `0.1.1` include:
+Pushing to `master` updates GitHub Pages after the WASM smoke test and Web build succeed. Pushing a strict `vX.Y.Z` tag first validates committed versions and runs the full CI gate, then builds desktop packages and native CLIs for Windows, Linux, and macOS. Rust/npm SDK publication, Web deployment, and the GitHub Release follow only after those gates pass.
+
+If publishing fails, manually dispatch the Release workflow on `master` with the existing `release_tag` and the original tag release's `source_run_id`. Recovery verifies the tag commit, original version/CI/four-platform build results, four unexpired artifact groups, and draft release. It then publishes SDKs and reuses the original artifacts to finish the GitHub Release, without moving the tag or rebuilding desktop packages. Expected assets for version `0.1.1` include:
 
 ```text
 bkmsa-0.1.1-windows-x64.exe
