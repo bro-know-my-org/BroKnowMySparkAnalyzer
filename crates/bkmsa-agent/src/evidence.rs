@@ -311,12 +311,22 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
         "Xms",
         "新生代",
         "年轻代",
+        "最大堆",
+        "初始堆",
+        "堆大小",
+        "堆容量",
+        "堆内存",
     ];
     let tuning_actions = [
         "改为",
         "设为",
         "设置为",
         "调整",
+        "修改",
+        "更改",
+        "提高",
+        "增加",
+        "减少",
         "调高",
         "调低",
         "调大",
@@ -341,10 +351,28 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
         .replace("并把", "\n把")
         .replace("并将", "\n将");
     if state.heap_only
-        && actions
-            .split(['。', '\n', '；', '，', ',', ';'])
-            .any(|clause| {
-                if !contains_any(clause, &tuning_targets) {
+        && actions.split(['。', '\n', '；', ';']).any(|sentence| {
+            let mut target_context = false;
+            sentence.split(['，', ',']).any(|clause| {
+                let has_target = contains_any(clause, &tuning_targets);
+                let implicit_target = target_context
+                    && contains_any(
+                        clause,
+                        &[
+                            "调整为",
+                            "改为",
+                            "设为",
+                            "设置为",
+                            "降到",
+                            "降低到",
+                            "调高到",
+                            "调低到",
+                            "上调到",
+                            "下调到",
+                        ],
+                    );
+                target_context = has_target || implicit_target;
+                if !target_context {
                     return false;
                 }
                 let mut changes = tuning_actions
@@ -357,19 +385,49 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
                     .collect::<Vec<_>>();
                 changes.sort_unstable();
                 let mut previous_end = 0;
+                let mut previous_negated = false;
                 changes.into_iter().any(|(at, end)| {
                     if at < previous_end {
                         return false;
                     }
                     let prefix = &clause[previous_end..at];
                     previous_end = end;
-                    !prefix.ends_with('不')
-                        && !contains_any(
+                    let read_prefix = prefix
+                        .rsplit(['并', '且', '后', '再'])
+                        .next()
+                        .unwrap_or(prefix);
+                    let read_only = contains_any(
+                        read_prefix,
+                        &["检查", "核实", "确认", "查看", "记录", "观察"],
+                    ) && clause.contains("是否");
+                    let negated = read_only
+                        || prefix.ends_with('不')
+                        || contains_any(
                             prefix,
-                            &["不要", "不建议", "不能", "先不", "暂不", "不再", "无法"],
+                            &[
+                                "不要",
+                                "不建议",
+                                "不应",
+                                "无需",
+                                "不必",
+                                "勿",
+                                "禁止",
+                                "避免",
+                                "不能",
+                                "先不",
+                                "暂不",
+                                "不再",
+                                "无法",
+                            ],
                         )
+                        || (previous_negated
+                            && contains_any(prefix, &["或", "、", "和", "及"])
+                            && !contains_any(prefix, &["且", "并", "先把", "先将"]));
+                    previous_negated = negated;
+                    !negated
                 })
             })
+        })
     {
         return Some(FinalProblem::UnverifiedHeapTuning);
     }
@@ -1384,6 +1442,64 @@ mod tests {
             assert_eq!(
                 check(&format!("# 优先处理\n{action}\n# 判断依据\n只有快照")),
                 Some(FinalProblem::UnverifiedHeapTuning)
+            );
+        }
+    }
+
+    #[test]
+    fn comma_separated_heap_targets_keep_operation_scope() {
+        let state = EvidenceState {
+            heap_only: true,
+            ..Default::default()
+        };
+        for (action, expected) in [
+            (
+                "对于 Xmx，调整为 8G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            ("对于 Xmx，不要调整为 8G", None),
+            (
+                "对于 Xmx，不要调整为 8G，G1NewSizePercent 改为 20",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            ("检查 Xmx，调整实体数量后复测", None),
+            (
+                "将最大堆调整为 8G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            (
+                "将最大<!--注释-->堆调整为 8G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            ("将初始堆设为 4G", Some(FinalProblem::UnverifiedHeapTuning)),
+            ("检查堆大小并记录当前值", None),
+            ("核实最大堆是否设置为 8G", None),
+            ("检查最大堆设置为8G是否合适", None),
+            (
+                "核实 Xmx 是否正确并删除 G1NewSizePercent",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            (
+                "检查 Xmx，调整为 8G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            (
+                "核实堆大小是否设置为 8G且将 Xms 设置为 4G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+            ("不要调整 Xmx 或删除 G1NewSizePercent，先补采 GC 日志", None),
+            (
+                "不要调整 Xmx 或删除 G1NewSizePercent且把 Xms 改为 4G",
+                Some(FinalProblem::UnverifiedHeapTuning),
+            ),
+        ] {
+            assert_eq!(
+                validate_final(
+                    &format!("# 优先处理\n{action}\n# 判断依据\n只有堆快照"),
+                    &state
+                ),
+                expected,
+                "{action}"
             );
         }
     }
