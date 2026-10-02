@@ -7,8 +7,15 @@ import type { SparkAnalyzerAdapter, SparkAnalyzerPreferences, SparkAnalyzerPrefe
 
 vi.mock("naive-ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("naive-ui")>();
+  const { defineComponent, h } = await import("vue");
+  const slotContainer = (name: string) => defineComponent({
+    name,
+    setup: (_, { slots }) => () => h("div", slots.default?.()),
+  });
   return {
     ...actual,
+    NCollapse: slotContainer("NCollapse"),
+    NCollapseItem: slotContainer("NCollapseItem"),
     createDiscreteApi: () => ({ message: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }),
   };
 });
@@ -91,10 +98,6 @@ describe("host preferences concurrency", () => {
       const adapter = makeAdapter();
       adapter.loadApiKey.mockResolvedValue("current-endpoint-key");
       const view = mountView({ load: () => loading.promise, save: vi.fn() }, adapter);
-      if (field === "temperature") {
-        await view.wrapper.find(".ai-advanced .n-collapse-item__header-main").trigger("click");
-        await flushPromises();
-      }
       const control = field === "model"
         ? view.wrapper.findAllComponents(NSelect).find((item) => Boolean(item.props("tag")))!
         : view.wrapper.findComponent(NInputNumber);
