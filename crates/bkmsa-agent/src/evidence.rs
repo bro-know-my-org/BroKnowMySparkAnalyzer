@@ -12,6 +12,7 @@ pub(crate) struct EvidenceState {
     pub hot_path_source_names: Vec<String>,
     pub hot_path_max_source_percent: Option<f64>,
     pub hot_path_entity_candidates: Vec<String>,
+    pub hot_path_max_entity_percent: Option<f64>,
     pub entity_chunk_names: Vec<String>,
     pub hot_path_text: String,
     pub selected_hot_path_categories: Vec<String>,
@@ -64,7 +65,7 @@ impl FinalProblem {
             Self::WeakConclusion => "回答仍然过于泛化。继续调用最能缩小范围的工具；若报告无法精确定位，明确写“当前报告无法唯一定位”并给出补采要求，禁止用泛泛的“可能原因”收口。".into(),
             Self::UnverifiedHeapTuning => "只有 heap 快照，尚无 CPU 调用树与 GC/tick 时间对齐证据。优先处理必须先补普通 CPU profile、GC 时间日志并核实宿主换页；删除直接调整堆/新生代的操作与精确参数值。环境配置仅可作为待验证线索，不能证明当前 tick 根因。".into(),
             Self::InfersBottleneckFromTotalCpu => "总进程/系统 CPU 较低不能排除主线程单核瓶颈，也不能证明瓶颈是暂停型。heap 报告没有 CPU 树，仅凭 MSPT 不能证明是执行开销或逐 tick 都繁忙。删除这类判断；根据主线程调用树和带时间戳的暂停证据确定方向。".into(),
-            Self::UnsupportedCertainty => format!("删去无充分证据的确定判断：聚合指标或最差窗口节选不能证明全程稳定/全程无恢复；低堆占用或平均 GC 正常不能排除内存因素；低总 CPU 不能证明单核跑满。改为实际观察到的范围和指标。{}", if state.filtered_ticks { "本报告只采慢 tick，不能称为普通采样；复测优先采普通 profile，二者占比不能直接比较。" } else { "" }),
+            Self::UnsupportedCertainty => format!("删去无充分证据的确定判断：聚合指标或最差窗口节选不能证明全程稳定/全程无恢复；低堆占用或平均 GC 正常不能排除内存因素；低总 CPU 不能证明单核跑满。改为实际观察到的范围和指标。{}", if state.filtered_ticks { "必须在判断依据交代本报告只采慢 tick 的范围与阈值/纳入数量（若已提供），不能称为普通采样或把这些热点外推全程；复测优先采普通 profile，二者占比不能直接比较。" } else { "" }),
         }
     }
 }
@@ -181,6 +182,23 @@ pub(crate) fn update(state: &mut EvidenceState, tool: &str, result: &Value) {
             .take(16)
             .collect();
         state.hot_path_sources_resolved |= !state.hot_path_source_names.is_empty();
+        if let Some(items) = result
+            .pointer("/attribution/entityCandidates")
+            .and_then(Value::as_array)
+        {
+            for item in items {
+                if item.get("entityId").and_then(Value::as_str).is_some() {
+                    if let Some(percent) = item.get("percent").and_then(Value::as_f64) {
+                        state.hot_path_max_entity_percent = Some(
+                            state
+                                .hot_path_max_entity_percent
+                                .unwrap_or(0.0)
+                                .max(percent),
+                        );
+                    }
+                }
+            }
+        }
         let candidates = result
             .pointer("/attribution/entityCandidates")
             .and_then(Value::as_array)
@@ -243,41 +261,49 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
         return Some(FinalProblem::UnsupportedMarkup);
     }
     let visible = crate::markdown::visible_text(content);
-    if state.filtered_ticks
-        && contains_any(
-            content,
-            &["本次普通采样", "本报告普通采样", "本次为普通采样"],
-        )
-    {
-        return Some(FinalProblem::UnsupportedCertainty);
+    let facts = factual_sections(content);
+    if state.filtered_ticks {
+        let sampling_facts = facts.to_ascii_lowercase();
+        let mut declares_scope = false;
+        let mut denies_scope = false;
+        for clause in sampling_facts.split(['。', '\n', '；', '，', ',']) {
+            let scope_mentions = ["慢 tick", "慢tick", "过滤采样", "过滤后的"]
+                .iter()
+                .flat_map(|term| clause.match_indices(term).map(|(at, _)| at))
+                .collect::<Vec<_>>();
+            if scope_mentions.is_empty() {
+                continue;
+            }
+            for at in scope_mentions {
+                let negated = has_matching_assertion_negation(clause, &[at]);
+                let prefix = &clause[..at];
+                declares_scope |=
+                    !negated && contains_any(clause, &["采样", "报告", "阈值", "纳入", "仅", "只"]);
+                denies_scope |= negated
+                    && contains_any(prefix, &["本报告", "本次", "这份", "当前报告"])
+                    && contains_any(prefix, &["不是", "并非", "不属于", "并未", "没有"])
+                    && !contains_any(
+                        prefix,
+                        &["不能证明", "无法证明", "不能说", "不代表", "没有证据"],
+                    );
+            }
+        }
+        let claims_ordinary = facts.split(['。', '\n', '，', ',']).any(|clause| {
+            contains_any(
+                clause,
+                &["本次", "本报告", "这份", "这是一份", "当前报告", "本采样"],
+            ) && contains_any(
+                clause,
+                &["普通采样", "普通执行采样", "普通执行模式采样", "未过滤"],
+            ) && !contains_any(clause, &["不是", "并非", "不能", "不可", "不代表"])
+        });
+        if !declares_scope || denies_scope || claims_ordinary {
+            return Some(FinalProblem::UnsupportedCertainty);
+        }
     }
     if factual_sections(content)
         .split(['。', '\n', '；'])
-        .any(|sentence| {
-            (contains_any(
-                sentence,
-                &[
-                    "TPS 全程稳定",
-                    "全程无恢复窗口",
-                    "近期在变差",
-                    "单核跑满",
-                    "单线程被加速逻辑占满",
-                ],
-            ) || (contains_any(sentence, &["内存", "GC"])
-                && contains_any(sentence, &["排除", "不是本次瓶颈", "不是主因"])))
-                && !contains_any(
-                    sentence,
-                    &[
-                        "不能",
-                        "无法",
-                        "不要",
-                        "不代表",
-                        "未确认",
-                        "不足以",
-                        "不排除",
-                    ],
-                )
-        })
+        .any(unsupported_certainty)
     {
         return Some(FinalProblem::UnsupportedCertainty);
     }
@@ -301,7 +327,33 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
     {
         return Some(FinalProblem::InfersBottleneckFromTotalCpu);
     }
-    let actions = section_text(content, false);
+    let mut actions = section_text(content, false);
+    for sentence in facts.split(['。', '\n', '；']) {
+        let advice = [
+            "建议",
+            "推荐",
+            "应当",
+            "应该",
+            "请",
+            "尝试",
+            "优先",
+            "可以将",
+            "可以把",
+            "可将",
+            "可把",
+            "先将",
+            "先把",
+        ]
+        .iter()
+        .flat_map(|term| sentence.match_indices(term).map(|(at, _)| at))
+        .min();
+        if let Some(at) = advice {
+            let prefix = sentence[..at].rsplit(['，', ',']).next().unwrap_or("");
+            let at = at - prefix.len();
+            actions.push('\n');
+            actions.push_str(&sentence[at..]);
+        }
+    }
     let tuning_targets = [
         "G1NewSizePercent",
         "G1MaxNewSizePercent",
@@ -455,6 +507,76 @@ pub(crate) fn validate_final(content: &str, state: &EvidenceState) -> Option<Fin
     None
 }
 
+fn unsupported_certainty(sentence: &str) -> bool {
+    let mut resource_context = false;
+    sentence
+        .split(['，', ',', '但', '却', '而', '且'])
+        .any(|clause| {
+            let names_resource = contains_any(&clause.to_ascii_lowercase(), &["内存", "gc"]);
+            let continues_resource = resource_context
+                && (clause.find("排除").is_some_and(|at| {
+                    matches!(
+                        clause[at + "排除".len()..].trim(),
+                        "" | "其影响" | "该因素" | "这一因素"
+                    )
+                }) || ["不是本次瓶颈", "不是主因"].iter().any(|claim| {
+                    clause.trim().strip_suffix(claim).is_some_and(|subject| {
+                        matches!(
+                            subject.trim(),
+                            "" | "它" | "其" | "该因素" | "这一因素" | "因此" | "所以" | "也"
+                        )
+                    })
+                }));
+            resource_context = names_resource || continues_resource;
+            let mut assertions = vec![
+                "TPS 全程稳定",
+                "全程无恢复窗口",
+                "近期在变差",
+                "单核跑满",
+                "单线程被加速逻辑占满",
+            ];
+            if resource_context {
+                assertions.extend(["排除", "不是本次瓶颈", "不是主因"]);
+            }
+            let mut claims = assertions
+                .iter()
+                .flat_map(|claim| {
+                    clause
+                        .match_indices(claim)
+                        .map(|(at, _)| (at, at + claim.len()))
+                })
+                .collect::<Vec<_>>();
+            claims.sort_unstable();
+            let mut previous_end = 0;
+            claims.into_iter().any(|(at, end)| {
+                let prefix = &clause[previous_end..at];
+                previous_end = end;
+                let negated = prefix.ends_with(['不', '未'])
+                    || contains_any(
+                        prefix,
+                        &[
+                            "不能",
+                            "无法",
+                            "不要",
+                            "不代表",
+                            "未确认",
+                            "不足以",
+                            "没有证据",
+                            "缺乏证据",
+                            "未能",
+                            "并非",
+                            "不是",
+                        ],
+                    );
+                !negated
+                    || contains_any(
+                        prefix,
+                        &["并非不能", "不是不能", "不能不", "并非没有", "不是没有"],
+                    )
+            })
+        })
+}
+
 fn denies_resolved_sources(content: &str, state: &EvidenceState) -> bool {
     (state.mod_sources_resolved || state.hot_path_sources_resolved)
         && contains_any(
@@ -475,9 +597,6 @@ fn denies_resolved_sources(content: &str, state: &EvidenceState) -> bool {
 }
 
 fn downplays_hot_path(content: &str, state: &EvidenceState) -> bool {
-    if !state.hot_path_sources_resolved {
-        return false;
-    }
     let lower = content.to_lowercase();
     let omits_sources = !state.hot_path_source_names.is_empty()
         && !state
@@ -507,17 +626,22 @@ fn downplays_hot_path(content: &str, state: &EvidenceState) -> bool {
     let significant = state
         .hot_path_max_source_percent
         .is_none_or(|percent| percent >= 1.0);
-    (significant && (omits_sources || omits_entities))
+    let entity_significant = state
+        .hot_path_max_entity_percent
+        .is_none_or(|percent| percent >= 1.0);
+    (significant && omits_sources)
+        || (entity_significant && omits_entities)
         || dismisses_candidate
-        || contains_any(
-            content,
-            &[
-                "mod_sources 未对它们形成一致来源归因",
-                "mod_sources 没有一致归因",
-                "不能作为重点怀疑",
-                "不能重点怀疑",
-            ],
-        )
+        || (state.hot_path_sources_resolved
+            && contains_any(
+                content,
+                &[
+                    "mod_sources 未对它们形成一致来源归因",
+                    "mod_sources 没有一致归因",
+                    "不能作为重点怀疑",
+                    "不能重点怀疑",
+                ],
+            ))
 }
 
 fn overstates_entity(content: &str, state: &EvidenceState) -> bool {
@@ -568,10 +692,26 @@ fn affirmative_entity_causation(clause: &str) -> bool {
 
 fn overstates_gc(content: &str) -> bool {
     if content.split(['。', '\n', '；']).any(|sentence| {
-        let lower = sentence.to_ascii_lowercase();
-        lower.contains("gc")
-            && sentence.contains("足以解释")
-            && !has_matching_gc_causation_negation(sentence)
+        let mut gc_context = false;
+        sentence.split(['，', ',']).any(|clause| {
+            let trimmed = clause.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            let continuation = trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+                || [
+                    "量级",
+                    "累计暂停",
+                    "总暂停",
+                    "平均暂停",
+                    "最大暂停",
+                    "最长暂停",
+                    "Old",
+                    "old",
+                ]
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix));
+            gc_context = lower.contains("gc") || (gc_context && continuation);
+            gc_context && clause.contains("足以解释") && !has_matching_gc_causation_negation(clause)
+        })
     }) {
         return true;
     }
@@ -631,6 +771,11 @@ fn has_matching_gc_causation_negation(clause: &str) -> bool {
     causals.dedup_by(|later, earlier| {
         *later == *earlier + "足以".len() && clause[*earlier..].starts_with("足以解释尖峰")
     });
+    has_matching_assertion_negation(clause, &causals)
+}
+
+fn has_matching_assertion_negation(clause: &str, causals: &[usize]) -> bool {
+    let lower = clause.to_ascii_lowercase();
     let negations = [
         "不足以",
         "不能证明",
@@ -641,6 +786,7 @@ fn has_matching_gc_causation_negation(clause: &str) -> bool {
         "不是",
         "并非",
         "并未",
+        "不属于",
         "没有",
         "未导致",
         "未造成",
@@ -1505,6 +1651,39 @@ mod tests {
     }
 
     #[test]
+    fn unknown_source_entities_have_independent_significance() {
+        for sources in [
+            json!([]),
+            json!([{"sourceId":"tiny", "sourceName":"Tiny", "maxPercent":0.1}]),
+        ] {
+            let mut state = EvidenceState::default();
+            update(
+                &mut state,
+                "hot_paths",
+                &json!({"attribution":{
+                    "topSources":sources,
+                    "entityCandidates":[{"entityId":"unknown:boss", "percent":35.0}]
+                }}),
+            );
+            assert_eq!(
+                validate_final("# 结论\nTiny 开销很低", &state),
+                Some(FinalProblem::DownplaysHotPathSources)
+            );
+            assert_eq!(
+                validate_final("# 结论\nunknown:boss 是排查对象", &state),
+                None
+            );
+        }
+        let mut state = EvidenceState::default();
+        update(
+            &mut state,
+            "hot_paths",
+            &json!({"attribution":{"entityCandidates":[{"entityId":"unknown:tiny", "percent":0.1}]}}),
+        );
+        assert_eq!(validate_final("# 结论\n暂未见明显热点", &state), None);
+    }
+
+    #[test]
     fn fenced_and_commented_headings_cannot_change_fact_scope() {
         assert_eq!(validate_final("# 结论\n需要补采\n<!--GC导致尖峰，进程CPU低说明瓶颈是停顿-->\n# 判断依据\n当前缺少时间对齐日志", &EvidenceState::default()), None);
         assert_eq!(
@@ -1548,7 +1727,7 @@ mod tests {
         }
         assert_eq!(
             validate_final(
-                "# 优先处理\n<!--将 Xmx 改为 8G-->\n检查当前 Xmx\n# 判断依据\n只有快照",
+                "# 优先处理\n<!--将 Xmx 改为 8G-->\n检查当前堆大小\n# 判断依据\n只有快照",
                 &state
             ),
             None
@@ -1598,6 +1777,85 @@ mod tests {
             ),
             Some(FinalProblem::UnsupportedMarkup)
         );
+        for section in ["# 结论", "# 判断依据"] {
+            assert_eq!(
+                validate_final(&format!("{section}\n建议将 Xmx 调整为 8G"), &state),
+                Some(FinalProblem::UnverifiedHeapTuning)
+            );
+        }
+        assert_eq!(
+            validate_final(
+                "# 判断依据\n当前配置将 Xmx 设置为8G，建议补采 GC 日志",
+                &state
+            ),
+            None
+        );
+        for text in [
+            "# 判断依据\n不建议将 Xmx 调整为 8G",
+            "# 结论\n不要尝试调整 Xmx",
+            "# 判断依据\n当前配置将 Xmx 设置为8G，不建议调整",
+        ] {
+            assert_eq!(validate_final(text, &state), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn gc_explanation_requires_a_gc_subject() {
+        assert_eq!(
+            validate_final(
+                "GC 平均暂停为 2ms，实体更新耗时足以解释当前 MSPT",
+                &EvidenceState::default()
+            ),
+            None
+        );
+        assert_eq!(
+            validate_final(
+                "GC 聚合：Old 收集一次，1575ms，量级足以解释尖峰",
+                &EvidenceState::default()
+            ),
+            Some(FinalProblem::OverstatesGcCorrelation)
+        );
+    }
+
+    #[test]
+    fn negated_exclusions_do_not_hide_later_certainty() {
+        for text in [
+            "尚未排除内存因素",
+            "没有证据可以排除 GC 影响",
+            "未能排除 GC 影响",
+            "不排除内存因素",
+            "内存仍需验证，已排除区块加载",
+            "GC 未排除，但已排除区块加载",
+            "内存占用低，区块加载不是主因",
+            "不能排除 gc 影响",
+            "当前并非单核跑满",
+            "当前不是单核跑满",
+            "内存占用低，区块加载不是本次瓶颈",
+        ] {
+            assert_eq!(
+                validate_final(text, &EvidenceState::default()),
+                None,
+                "{text}"
+            );
+        }
+        for text in [
+            "可以排除内**存**因素",
+            "可以排除内&#23384;因素",
+            "尚未排除内存因素，但可以排除 GC 影响",
+            "没有证据可以排除 GC 影响，内存不是主因",
+            "不能证明实体堆积，但可以排除内存因素",
+            "内存占用低，已排除其影响",
+            "GC 指标正常，不是本次瓶颈",
+            "内存占用低，该因素不是主因",
+            "可以排除 gc 影响",
+            "当前不是不能证明单核跑满",
+        ] {
+            assert_eq!(
+                validate_final(text, &EvidenceState::default()),
+                Some(FinalProblem::UnsupportedCertainty),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -1662,8 +1920,7 @@ mod tests {
 
     #[test]
     fn selected_category_can_be_explained_in_evidence_without_crowding_the_lead() {
-        let state = EvidenceState {
-            filtered_ticks: true,
+        let mut state = EvidenceState {
             selected_hot_path_categories: vec!["chunk_task".into()],
             ..Default::default()
         };
@@ -1678,6 +1935,76 @@ mod tests {
             validate_final("# 结论\n暂未见持续过载", &state),
             Some(FinalProblem::OmitsSelectedCategory)
         );
+        let io = EvidenceState {
+            selected_hot_path_categories: vec!["io".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_final(
+                "# 结论\n当前无持续过载\n# 复测与补采\n下次检查文件读写",
+                &io
+            ),
+            Some(FinalProblem::OmitsSelectedCategory)
+        );
+        assert_eq!(
+            validate_final(
+                "# 结论\n当前无持续过载\n# 判断依据\n文件读写占 3%，未见明显长调用",
+                &io
+            ),
+            None
+        );
+        state.filtered_ticks = true;
+        assert_eq!(
+            validate_final(
+                "# 判断依据\n本报告仅采慢 Tick，区块任务47%代表被纳入的慢 Tick",
+                &state
+            ),
+            None
+        );
+        assert_eq!(validate_final("# 判断依据\n本报告仅采慢 tick，区块任务47%代表被纳入的慢tick。本报告无法证明慢 tick 的具体成因", &state), None);
+        assert_eq!(
+            validate_final(
+                "# 判断依据\n本报告仅采慢 tick，区块任务47%。这不代表本报告不是慢tick采样",
+                &state
+            ),
+            None
+        );
+        for text in [
+            "本报告不是慢 tick 采样",
+            "本报告并非慢tick采样",
+            "本报告不属于慢 tick 采样",
+            "本报告是慢 tick 采样。本次并非过滤采样",
+        ] {
+            assert_eq!(
+                validate_final(
+                    &format!("# 结论\n{text}\n# 判断依据\n区块任务占47%"),
+                    &state
+                ),
+                Some(FinalProblem::UnsupportedCertainty),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            validate_final("# 判断依据\n区块任务占47%", &state),
+            Some(FinalProblem::UnsupportedCertainty)
+        );
+        assert_eq!(validate_final("# 判断依据\n本报告仅采慢 tick，区块任务47%代表被纳入的慢tick\n# 复测与补采\n本次普通采样请补120秒", &state), None);
+        for text in [
+            "这是一份普通执行采样",
+            "本报告为普通执行模式采样",
+            "本次为未过滤采样",
+        ] {
+            assert_eq!(
+                validate_final(text, &state),
+                Some(FinalProblem::UnsupportedCertainty),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            validate_final("本报告不是普通执行采样；仅采慢 tick", &state),
+            Some(FinalProblem::OmitsSelectedCategory)
+        );
+        assert_eq!(validate_final("# 判断依据\n区块任务仅代表慢 tick 内部的负载，不能与本次普通采样直接比较\n# 复测与补采\n补一份普通采样", &state), None);
         assert_eq!(
             validate_final("本次普通采样", &state),
             Some(FinalProblem::UnsupportedCertainty)
