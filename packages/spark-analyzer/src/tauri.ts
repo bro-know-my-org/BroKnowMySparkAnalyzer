@@ -1,4 +1,5 @@
 import type {
+  AgentTrace,
   AiModelInfo,
   AnalysisResult,
   LoadedReport,
@@ -57,10 +58,18 @@ export function createTauriSparkAnalyzerAdapter(): SparkAnalyzerAdapter {
       });
     },
 
-    runAnalysis(reportId, config) {
-      return invoke<AnalysisResult>("analyzer_run_analysis", {
-        request: { report_id: reportId, config },
-      });
+    async runAnalysis(reportId, config, onTrace) {
+      const { Channel, invoke: tauriInvoke } = await import("@tauri-apps/api/core");
+      const channel = onTrace ? new Channel<AgentTrace>(onTrace) : undefined;
+      try {
+        return await tauriInvoke<AnalysisResult>(command("analyzer_run_analysis"), {
+          request: { report_id: reportId, config },
+          onTrace: channel ?? null,
+        });
+      } finally {
+        // Queued channel messages must not update a completed or failed run.
+        if (channel) channel.onmessage = () => {};
+      }
     },
 
     cancelAnalysis(reportId) {

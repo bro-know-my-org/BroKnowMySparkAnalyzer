@@ -161,6 +161,7 @@ impl Analyzer {
         &self,
         report_id: String,
         config: JsValue,
+        on_trace: Option<js_sys::Function>,
     ) -> Result<JsValue, JsValue> {
         let report = self.report_clone(&report_id)?;
         let config: bkmsa_agent::AiConfig =
@@ -178,19 +179,42 @@ impl Analyzer {
             previous.handle.abort();
         }
         let result = futures::future::Abortable::new(
-            bkmsa_agent::run_analysis(
+            bkmsa_agent::run_tool_agent(
                 report.as_ref(),
                 &client,
                 bkmsa_agent::AgentOptions::default(),
+                |trace| {
+                    // Cancellation inside a JS callback cannot interrupt the current poll.
+                    // Drop the RefCell borrow before calling back into the analyzer.
+                    let active = self
+                        .analysis_runs
+                        .borrow()
+                        .get(&report_id)
+                        .is_some_and(|run| run.id == run_id);
+                    if !active {
+                        return;
+                    }
+                    if let Some(callback) = &on_trace {
+                        if let Ok(value) = to_js_value(trace) {
+                            // UI callback failures must not discard the analysis result.
+                            let _ = callback.call1(&JsValue::UNDEFINED, &value);
+                        }
+                    }
+                },
             ),
             registration,
         )
         .await;
         let mut runs = self.analysis_runs.borrow_mut();
-        if runs.get(&report_id).is_some_and(|run| run.id == run_id) {
+        let active = runs.get(&report_id).is_some_and(|run| run.id == run_id);
+        if active {
             runs.remove(&report_id);
         }
         drop(runs);
+        // The final trace callback may cancel even when the agent returns Ready.
+        if !active {
+            return Err(js_error("分析已中止"));
+        }
         let result = result
             .map_err(|_| js_error("分析已中止"))?
             .map_err(js_error)?;

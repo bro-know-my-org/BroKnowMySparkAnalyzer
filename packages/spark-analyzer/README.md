@@ -30,7 +30,7 @@ const adapter: SparkAnalyzerAdapter = {
   loadTextReport: (text, source) => backend.loadTextReport(text, source),
   fetchReport: (source) => backend.fetchReport(source),
   executeTool: (reportId, tool, args) => backend.executeTool(reportId, tool, args),
-  runAnalysis: (reportId, config) => backend.runAnalysis(reportId, config),
+  runAnalysis: (reportId, config, onTrace) => backend.runAnalysis(reportId, config, onTrace),
   cancelAnalysis: (reportId) => backend.cancelAnalysis(reportId),
   askFollowUp: (reportId, config, traces, diagnosis, history, question) =>
     backend.askFollowUp(reportId, config, traces, diagnosis, history, question),
@@ -52,6 +52,8 @@ const adapter: SparkAnalyzerAdapter = {
 ```
 
 UI 不直接调用 Tauri 或 WASM API。仓库内的 standalone host 在桌面端把 adapter 映射到 `analyzer_*` Tauri commands，在浏览器端延迟加载 `bkmsa-wasm`。
+
+`runAnalysis` 的可选第三个参数 `onTrace` 用于逐条通知执行轨迹。自定义宿主应转发此回调；最终返回值仍包含完整 `traces`。未实现回调的宿主仍可运行，但轨迹会在分析结束时统一显示。
 
 包内样式仅作用于组件自动设置的 `.bkmsa-scope` 边界，包括全屏诊断和图片导出节点，不修改宿主的根主题变量、标题或通用布局类。宿主无需给应用根节点添加这个类。
 
@@ -141,7 +143,7 @@ const adapter: SparkAnalyzerAdapter = {
   loadTextReport: (text, source) => backend.loadTextReport(text, source),
   fetchReport: (source) => backend.fetchReport(source),
   executeTool: (reportId, tool, args) => backend.executeTool(reportId, tool, args),
-  runAnalysis: (reportId, config) => backend.runAnalysis(reportId, config),
+  runAnalysis: (reportId, config, onTrace) => backend.runAnalysis(reportId, config, onTrace),
   cancelAnalysis: (reportId) => backend.cancelAnalysis(reportId),
   askFollowUp: (reportId, config, traces, diagnosis, history, question) =>
     backend.askFollowUp(reportId, config, traces, diagnosis, history, question),
@@ -163,6 +165,8 @@ const adapter: SparkAnalyzerAdapter = {
 ```
 
 The UI does not call Tauri or WASM APIs directly. The repository's standalone host maps the adapter to `analyzer_*` Tauri commands on desktop and lazily loads `bkmsa-wasm` in browsers.
+
+The optional third argument to `runAnalysis`, `onTrace`, delivers execution traces incrementally. Custom hosts should forward this callback; the final result still includes the complete `traces` history. Hosts without callback support continue to work and display traces when analysis finishes.
 
 Tauri 2 hosts should use the matching `bkmsa-tauri` crate and the packaged adapter:
 

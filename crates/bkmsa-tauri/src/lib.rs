@@ -525,11 +525,14 @@ fn analyzer_release_report(
 }
 
 #[tauri::command]
-async fn analyzer_run_analysis(
+async fn analyzer_run_analysis<R: Runtime>(
     request: RunAnalysisRequest,
+    on_trace: Option<tauri::ipc::JavaScriptChannelId>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, AnalyzerState>,
     authorization: tauri::State<'_, HostAuthorization>,
 ) -> Result<bkmsa_agent::AgentResult, String> {
+    let on_trace = on_trace.map(|id| id.channel_on::<R, bkmsa_agent::AgentTrace>(webview));
     authorization.authorize(HostCapability::Network)?;
     authorization.authorize(HostCapability::Credentials)?;
     let report = state.get(&request.report_id)?;
@@ -540,7 +543,12 @@ async fn analyzer_run_analysis(
     let result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => Err("分析已中止".to_string()),
-        result = bkmsa_agent::run_analysis(report.as_ref(), &client, bkmsa_agent::AgentOptions::default()) => {
+        result = bkmsa_agent::run_tool_agent(report.as_ref(), &client, bkmsa_agent::AgentOptions::default(), |trace| {
+            if let Some(channel) = &on_trace {
+                // Progress delivery is best effort; the final result retains every trace.
+                let _ = channel.send(trace.clone());
+            }
+        }) => {
             result.map_err(|error| error.to_string())
         }
     };

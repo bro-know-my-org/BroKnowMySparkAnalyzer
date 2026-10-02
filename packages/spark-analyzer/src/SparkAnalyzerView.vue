@@ -724,6 +724,7 @@ async function runAnalysis() {
     return;
   }
   const runId = analysisRunId.value + 1;
+  const reportId = report.value.reportId;
   analysisRunId.value = runId;
   busy.value = true;
   traces.value = [];
@@ -732,7 +733,10 @@ async function runAnalysis() {
   followUpInput.value = "";
   statusKey.value = "analyzing";
   try {
-    const result = await props.adapter.runAnalysis(report.value.reportId, currentConfig());
+    const result = await props.adapter.runAnalysis(reportId, currentConfig(), (trace) => {
+      if (!componentAlive || !busy.value || analysisRunId.value !== runId || report.value?.reportId !== reportId) return;
+      traces.value.push(trace);
+    });
     if (analysisRunId.value !== runId) return;
     traces.value = result.traces ?? [];
     aiOutput.value = result.diagnosis;
