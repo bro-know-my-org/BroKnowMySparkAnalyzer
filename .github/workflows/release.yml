@@ -298,7 +298,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write # Draft release lookup requires push access.
       actions: read
     outputs:
       tag: ${{ steps.recovery.outputs.tag }}
