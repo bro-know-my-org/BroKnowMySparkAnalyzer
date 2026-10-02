@@ -128,6 +128,12 @@ fn desktop_streams_traces_while_provider_is_pending_and_can_cancel() {
     let (index, trace) = trace_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(index, 0);
     assert_eq!(trace.title, "Tool: report_inventory");
+    for (expected_index, expected_title) in [(1, "Tool: overview"), (2, "Tool: evidence_gaps")] {
+        let (index, trace) = trace_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(index, expected_index);
+        assert_eq!(trace.title, expected_title);
+        assert_eq!(trace.round, 0);
+    }
     assert!(
         !analysis.is_finished(),
         "trace must arrive before analysis resolves"

@@ -31,9 +31,8 @@ const response = (content) => new Response(JSON.stringify({ choices: [{ message:
 });
 globalThis.fetch = async () => {
   requests += 1;
-  if (requests === 1) return response('{"tool":"overview","args":{}}');
-  if (requests === 2) { notifyPaused(); await responseGate; }
-  return response("# 结论\n当前报告无法唯一定位。\n# 证据链\n只有文本记录。\n# 排除项\n无采样证据。\n# 还不能确定的点\n需要补采 spark 报告。\n# 立刻执行\n补采报告。");
+  if (requests === 1) { notifyPaused(); await responseGate; }
+  return response("# 结论\n当前报告无法唯一定位。\n# 优先处理\n卡顿时采集 CPU profile。\n# 判断依据\n只有文本记录，无采样证据。\n# 复测与补采\n同人数同区域补采 spark 报告。");
 };
 try {
   const config = { base_url: "https://provider.invalid/v1", api_key: "mock", model: "mock", temperature: 0.2, timeout_secs: 5 };
@@ -43,10 +42,12 @@ try {
   await Promise.race([paused, pending.then(() => { throw new Error("analysis finished before provider paused"); })]);
   assert.equal(finished, false);
   assert.deepEqual(traces.filter((trace) => trace.role === "tool").map((trace) => trace.title), [
-    "Tool: report_inventory", "Tool: overview",
+    "Tool: report_inventory", "Tool: overview", "Tool: evidence_gaps",
   ]);
   resume();
   const result = await pending;
+  assert.equal(result.rounds, 1);
+  assert.equal(result.reached_round_limit, false);
   assert.deepEqual(traces, result.traces);
   assert.equal(analyzer.cancelAnalysis(report.reportId), false);
 
@@ -62,19 +63,19 @@ try {
   await rejected;
   resolveCanceled(response('{"tool":"overview","args":{}}'));
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(canceledTraces.length, 1);
+  assert.equal(canceledTraces.length, 3);
 
-  // Forced tool checks emit consecutive traces in one poll. A callback may
+  // Prefetched tools emit consecutive traces in one poll. A callback may
   // synchronously cancel or release its report between those emissions.
-  for (const stage of ["forced-tool", "final-answer"]) for (const action of ["cancel", "release"]) {
+  for (const stage of ["prefetch-tool", "final-answer"]) for (const action of ["cancel", "release"]) {
     const current = analyzer.loadTextReport("Can't keep up!", "callback-cancellation");
-    globalThis.fetch = async () => response(stage === "forced-tool" ? "Premature final answer" : result.diagnosis);
+    globalThis.fetch = async () => response(result.diagnosis);
     const callbackTraces = [];
     let stopped = false;
     const pending = analyzer.runAnalysis(current.reportId, config, (trace) => {
       callbackTraces.push(trace);
-      const shouldStop = stage === "forced-tool"
-        ? trace.title === "Premature final blocked"
+      const shouldStop = stage === "prefetch-tool"
+        ? trace.title === "Tool: overview"
         : trace.role === "assistant" && callbackTraces.some((item) => item.title === "Tool: evidence_gaps");
       if (shouldStop) {
         if (action === "cancel") stopped = analyzer.cancelAnalysis(current.reportId);
@@ -83,7 +84,7 @@ try {
     });
     await assert.rejects(pending, (error) => String(error).includes("分析已中止"));
     assert.equal(stopped, true);
-    assert.equal(callbackTraces.at(-1).title, stage === "forced-tool" ? "Premature final blocked" : "AI");
+    assert.equal(callbackTraces.at(-1).title, stage === "prefetch-tool" ? "Tool: overview" : "AI");
     analyzer.releaseReport(current.reportId);
   }
 } finally {
