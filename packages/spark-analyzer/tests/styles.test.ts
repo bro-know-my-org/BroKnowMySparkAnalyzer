@@ -39,7 +39,7 @@ it("does not change host headings, generic layout classes or root theme variable
 
 it("styles analyzer roots, descendants, teleported diagnosis and image exports", () => {
   document.body.innerHTML = `
-    <div class="bkmsa-scope app-shell"><h2>Analyzer</h2><div class="panel">Panel</div></div>
+    <div class="bkmsa-scope app-shell"><h2>Analyzer</h2><header class="window-titlebar" data-embedded="true"></header><div class="panel">Panel</div></div>
     <div class="bkmsa-scope fullscreen-diagnosis" data-theme="light"><h2>Diagnosis</h2></div>
     <div class="bkmsa-scope markdown-body image-export-node"><h2>Export</h2></div>
   `;
@@ -48,11 +48,13 @@ it("styles analyzer roots, descendants, teleported diagnosis and image exports",
   const fullscreen = document.querySelector(".fullscreen-diagnosis")!;
   const exported = document.querySelector(".image-export-node")!;
   expect(getComputedStyle(app).display).toBe("flex");
-  expect(getComputedStyle(app).getPropertyValue("--text").trim()).toBe("#dce4ea");
+  expect(getComputedStyle(app).getPropertyValue("--text").trim()).toBe("#e5eaf3");
   expect(getComputedStyle(app.querySelector("h2")!).fontSize).toBe("15px");
-  expect(getComputedStyle(app.querySelector(".panel")!).padding).toBe("14px");
+  expect(getComputedStyle(app.querySelector(".panel")!).padding).toBe("22px");
+  expect(getComputedStyle(app.querySelector(".window-titlebar")!).height).toBe("auto");
+  expect(getComputedStyle(app.querySelector(".window-titlebar")!).flexBasis).toBe("auto");
   expect(getComputedStyle(fullscreen).display).toBe("flex");
-  expect(getComputedStyle(fullscreen).getPropertyValue("--text").trim()).toBe("#202830");
+  expect(getComputedStyle(fullscreen).getPropertyValue("--text").trim()).toBe("#202b3d");
   expect(getComputedStyle(exported).position).toBe("fixed");
   expect(getComputedStyle(exported.querySelector("h2")!).fontSize).toBe("18px");
 });

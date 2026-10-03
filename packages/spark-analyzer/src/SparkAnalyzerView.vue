@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
 import { Github, Language } from "@vicons/fa";
+import { ArrowUpload24Regular, Settings24Regular } from "@vicons/fluent";
 import DOMPurify from "dompurify";
 import { renderDiagnosisImage } from "./image-export";
 import { marked } from "marked";
@@ -95,12 +96,15 @@ const copy = {
       canceled: "Agent 分析已中止",
     },
     ui: {
-      subtitle: "Spark Agent Workbench",
+      overview: "报告概览",
+      workspace: "分析工作台",
+      aiSettings: "AI 设置",
+      configureAi: "配置模型后即可分析",
       clear: "清空",
       debug: "Debug",
       report: "报告",
       reportTip: "拖入 .sparkprofile 或 .sparkheap；文件仅在本机解析，不会上传。",
-      dropTitle: "拖入 spark 报告",
+      dropTitle: "点击选择或拖入报告",
       dropHint: ".sparkprofile / .sparkheap / health protobuf",
       sourcePlaceholder: "Spark 报告链接 / bytebin key",
       fetch: "拉取链接",
@@ -128,7 +132,7 @@ const copy = {
       cpuHotspots: "CPU 热点",
       entityLoad: "实体分布",
       heapObjects: "堆内存对象",
-      noVisualData: "载入 spark profile 或 heap 报告后显示热点排行。",
+      noVisualData: "暂无热点数据",
       reportEnvironment: "报告内环境",
       platform: "平台",
       java: "Java",
@@ -194,12 +198,15 @@ const copy = {
       canceled: "Agent canceled",
     },
     ui: {
-      subtitle: "Spark Agent Workbench",
+      overview: "Overview",
+      workspace: "Analysis workspace",
+      aiSettings: "AI settings",
+      configureAi: "Configure a model to analyze",
       clear: "Clear",
       debug: "Debug",
       report: "Report",
       reportTip: "Drop .sparkprofile or .sparkheap files. Files are parsed locally and are not uploaded.",
-      dropTitle: "Drop spark report",
+      dropTitle: "Choose or drop a report",
       dropHint: ".sparkprofile / .sparkheap / health protobuf",
       sourcePlaceholder: "spark viewer URL / bytebin key",
       fetch: "Fetch URL",
@@ -227,7 +234,7 @@ const copy = {
       cpuHotspots: "CPU Hotspots",
       entityLoad: "Entity Distribution",
       heapObjects: "Heap Objects",
-      noVisualData: "Load a spark profile or heap report to see hotspot rankings.",
+      noVisualData: "No hotspot data",
       reportEnvironment: "Report Environment",
       platform: "Platform",
       java: "Java",
@@ -334,6 +341,30 @@ watch([providerId, baseUrl, model, temperature, apiKey], () => {
 }, { flush: "sync" });
 const language = ref<Lang>("zh");
 const themeMode = ref<ThemeMode>(props.theme ?? "dark");
+const activeTab = ref<"overview" | "diagnosis" | "trace">("overview");
+const reportTabs = ["overview", "diagnosis", "trace"] as const;
+const tabId = useId();
+function navigateReportTabs(event: KeyboardEvent) {
+  const index = reportTabs.indexOf(activeTab.value);
+  const next = event.key === "ArrowRight" ? (index + 1) % reportTabs.length
+    : event.key === "ArrowLeft" ? (index + reportTabs.length - 1) % reportTabs.length
+    : event.key === "Home" ? 0 : event.key === "End" ? reportTabs.length - 1 : -1;
+  if (next < 0) return;
+  event.preventDefault();
+  activeTab.value = reportTabs[next]!;
+  (event.currentTarget as HTMLElement).parentElement?.querySelectorAll("button")[next]?.focus();
+}
+const aiSettingsOpen = ref(false);
+const themeOverrides = computed(() => ({
+  common: {
+    primaryColor: themeMode.value === "light" ? "#3567d6" : "#82a7ff",
+    primaryColorHover: themeMode.value === "light" ? "#2855bd" : "#a0bcff",
+    primaryColorPressed: themeMode.value === "light" ? "#2149a6" : "#6d94ee",
+    primaryColorSuppl: "#3567d6",
+    borderRadius: "6px",
+    fontFamily: 'Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif',
+  },
+}));
 const debugMode = ref(false);
 const altPressed = ref(false);
 
@@ -624,6 +655,7 @@ function replaceReport(next: LoadedReport) {
   busy.value = false;
   followUpBusy.value = false;
   report.value = next;
+  activeTab.value = "overview";
   reportEnvironment.value = null;
   if (previous && previous.reportId !== next.reportId) {
     void props.adapter.releaseReport(previous.reportId).catch(() => undefined);
@@ -645,6 +677,7 @@ async function releaseCurrentReport() {
 }
 
 async function fetchRemoteReport() {
+  if (fetchingReport.value) return;
   if (!sourceInput.value.trim()) {
     message.warning(t.value.msg.sourceRequired);
     return;
@@ -1395,7 +1428,7 @@ const InfoTip = (props: { text: string }) =>
 </script>
 
 <template>
-  <n-config-provider :theme="naiveTheme">
+  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-layout class="bkmsa-scope app-shell" :data-theme="themeMode" :data-embedded="String(props.embedded)">
         <header class="window-titlebar" :data-embedded="String(props.embedded)">
@@ -1403,14 +1436,12 @@ const InfoTip = (props: { text: string }) =>
             <div class="title-stack">
               <div class="title-row">
                 <h1>BroKnowMySparkAnalyzer</h1>
-                <n-tag type="success" size="small" :bordered="false">{{ status }}</n-tag>
+                <span class="status-indicator" :data-status="statusKey" role="status">{{ status }}</span>
               </div>
-              <p class="eyebrow">{{ t.ui.subtitle }}</p>
             </div>
           </div>
           <div v-else class="embedded-status">
-            <n-tag type="success" size="small" :bordered="false">{{ status }}</n-tag>
-            <span>{{ t.ui.subtitle }}</span>
+            <span class="status-indicator" :data-status="statusKey" role="status">{{ status }}</span>
           </div>
           <n-space align="center" class="top-actions" :wrap="false" @mousedown.stop>
             <div v-if="!languageControlled" class="control-pair">
@@ -1434,8 +1465,8 @@ const InfoTip = (props: { text: string }) =>
         </header>
 
         <n-layout has-sider class="workspace">
-          <n-layout-sider class="sidebar" :width="360" bordered content-style="padding: 18px;">
-            <section class="panel resizable-panel">
+          <n-layout-sider class="sidebar" :width="292" bordered content-style="padding: 22px 18px;">
+            <section class="panel import-panel">
               <div class="panel-title">
                 <h2>{{ t.ui.report }}</h2>
                 <div class="panel-title-actions">
@@ -1446,12 +1477,18 @@ const InfoTip = (props: { text: string }) =>
 
               <label
                 class="drop-zone"
+                tabindex="0"
+                role="button"
+                :aria-label="t.ui.dropTitle"
+                @keydown.enter.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()"
+                @keydown.space.prevent="($event.currentTarget as HTMLElement).querySelector('input')?.click()"
                 :data-dragging="String(dragging)"
                 @dragover.prevent="dragging = true"
                 @dragleave="dragging = false"
                 @drop="onDrop"
               >
                 <input type="file" @change="(event) => handleFiles((event.target as HTMLInputElement).files ?? [])" />
+                <n-icon class="upload-icon" :component="ArrowUpload24Regular" />
                 <strong>{{ t.ui.dropTitle }}</strong>
                 <span>{{ t.ui.dropHint }}</span>
               </label>
@@ -1461,6 +1498,7 @@ const InfoTip = (props: { text: string }) =>
                 v-model:value="sourceInput"
                 :placeholder="t.ui.sourcePlaceholder"
                 clearable
+                @keydown.enter="fetchRemoteReport"
               />
               <n-button
                 block
@@ -1486,48 +1524,20 @@ const InfoTip = (props: { text: string }) =>
               </n-collapse>
             </section>
 
-            <section class="panel resizable-panel mt-16">
+            <section class="analysis-controls">
               <div class="panel-title">
-                <h2>AI</h2>
-                <div class="panel-title-actions">
-                  <n-button size="small" secondary :loading="aiConfigSaving" :disabled="aiConfigSaving" @click="saveLocalAiConfig">{{ t.ui.saveAiConfig }}</n-button>
-                  <component :is="InfoTip" :text="t.ui.aiTip" />
-                </div>
-              </div>
-              <n-select :value="providerId" :options="providerOptions" @update:value="applyProvider" />
-              <n-input v-model:value="baseUrl" class="mt-10" :placeholder="t.ui.baseUrlPlaceholder" />
-              <n-input v-model:value="apiKey" class="mt-10" type="password" show-password-on="click" :placeholder="t.ui.apiKeyPlaceholder" />
-              <div class="model-row mt-10">
-                <n-select
-                  v-model:value="model"
-                  :options="modelOptions"
-                  :placeholder="t.ui.modelPlaceholder"
-                  filterable
-                  tag
-                />
-                <n-button :loading="fetchingModels" secondary @click="fetchModels">{{ t.ui.getModels }}</n-button>
-              </div>
-              <n-collapse class="mt-10 ai-advanced">
-                <n-collapse-item :title="t.ui.advancedAi" name="advanced-ai">
-                  <div class="field-label">
-                    <span>{{ t.ui.temperature }}</span>
-                    <n-text depth="3">{{ t.ui.temperatureTip }}</n-text>
-                  </div>
-                  <n-input-number v-model:value="temperature" class="full" :min="0" :max="2" :step="0.1" />
-                </n-collapse-item>
-              </n-collapse>
-              <n-space class="mt-12" :wrap="false">
-                <n-button :loading="testing" secondary @click="testAi">{{ t.ui.test }}</n-button>
-                <n-button type="primary" :loading="busy" :disabled="!canAnalyze" @click="runAnalysis">
-                  {{ t.ui.analyze }}
+                <h2>{{ t.ui.diagnosis }}</h2>
+                <n-button size="small" quaternary :aria-label="t.ui.aiSettings" @click="aiSettingsOpen = true">
+                  <template #icon><n-icon :component="Settings24Regular" /></template>
+                  {{ t.ui.aiSettings }}
                 </n-button>
-                <n-button secondary type="warning" :disabled="!busy" @click="stopAnalysis">
-                  {{ t.ui.stopAnalysis }}
-                </n-button>
-              </n-space>
+              </div>
+              <p class="model-caption" :title="model">{{ model || t.ui.configureAi }}</p>
+              <n-button block type="primary" :loading="busy" :disabled="!canAnalyze" @click="activeTab = 'diagnosis'; runAnalysis()">{{ t.ui.analyze }}</n-button>
+              <n-button v-if="busy" block secondary class="mt-8" type="warning" @click="stopAnalysis">{{ t.ui.stopAnalysis }}</n-button>
             </section>
 
-            <section class="panel resizable-panel followup-panel sidebar-followup mt-16">
+            <section v-show="activeTab === 'diagnosis' && aiOutput" class="panel followup-panel sidebar-followup mt-16">
               <div class="panel-title">
                 <h2>{{ t.ui.followUp }}</h2>
                 <n-tag size="small" :bordered="false">{{ followUps.length }}</n-tag>
@@ -1560,8 +1570,19 @@ const InfoTip = (props: { text: string }) =>
             </section>
           </n-layout-sider>
 
-          <n-layout class="main-content" content-style="padding: 18px;">
-            <section class="metrics-row">
+          <n-layout class="main-content" content-style="padding: 28px 32px;">
+            <div v-if="report" class="workspace-heading">
+              <p class="report-source" :title="report.source">{{ report.source }}</p>
+            </div>
+            <div v-show="report" class="workspace-tabs" role="tablist" :aria-label="t.ui.workspace">
+              <button v-for="tab in reportTabs" :id="`${tabId}-tab-${tab}`" :key="tab" role="tab" type="button" :aria-selected="activeTab === tab" :aria-controls="`${tabId}-panel-${tab}`" :tabindex="activeTab === tab ? 0 : -1" @keydown="navigateReportTabs" @click="activeTab = tab">
+                {{ tab === 'overview' ? t.ui.overview : tab === 'diagnosis' ? t.ui.diagnosis : t.ui.trace }}
+                <span v-if="tab === 'trace' && traces.length" class="tab-count">{{ traces.length }}</span>
+              </button>
+            </div>
+            <div v-show="!report || activeTab === 'overview'" :id="`${tabId}-panel-overview`" role="tabpanel" :aria-labelledby="`${tabId}-tab-overview`">
+            <div v-if="!report" class="report-empty">{{ status }}</div>
+            <section v-if="report" class="metrics-row">
               <n-statistic :label="t.ui.type" :value="report?.kind ?? '-'" />
               <n-statistic label="TPS 1m" :value="summary?.tps1m === undefined ? '-' : formatNumber(summary.tps1m)" />
               <n-statistic label="MSPT P95/Max" :value="`${formatNumber(summary?.msptP95)} / ${formatNumber(summary?.msptMax)}`" />
@@ -1569,10 +1590,9 @@ const InfoTip = (props: { text: string }) =>
               <n-statistic :label="t.ui.entities" :value="summary?.entityCount === undefined ? '-' : formatNumber(summary.entityCount)" />
             </section>
 
-            <section class="panel visual-overview">
+            <section v-if="report" class="panel visual-overview">
               <div class="panel-title compact">
                 <h2>{{ t.ui.visualOverview }}</h2>
-                <n-tag size="small" :bordered="false">{{ visualSections.length }}</n-tag>
               </div>
               <div v-if="visualSections.length" class="visual-grid">
                 <article v-for="section in visualSections" :key="section.key" class="visual-card">
@@ -1593,7 +1613,7 @@ const InfoTip = (props: { text: string }) =>
               <div v-else class="empty visual-empty">{{ t.ui.noVisualData }}</div>
             </section>
 
-            <section class="content-grid mt-16">
+            <section v-if="report" class="content-grid mt-16">
               <div class="panel resizable-panel status-panel">
                 <div class="panel-title compact">
                   <h2>{{ t.ui.reportStatus }}</h2>
@@ -1633,6 +1653,9 @@ const InfoTip = (props: { text: string }) =>
                 </div>
               </div>
 
+            </section>
+            </div>
+            <section v-show="report && activeTab === 'trace'" :id="`${tabId}-panel-trace`" role="tabpanel" :aria-labelledby="`${tabId}-tab-trace`">
               <div class="panel resizable-panel trace-panel">
                 <div class="panel-title compact">
                   <h2>{{ t.ui.trace }}</h2>
@@ -1640,7 +1663,7 @@ const InfoTip = (props: { text: string }) =>
                     {{ debugMode ? t.ui.raw : t.ui.summary }}
                   </n-tag>
                 </div>
-                <div v-if="traces.length === 0" class="empty">{{ t.ui.noTrace }}</div>
+                <div v-if="traces.length === 0" class="empty reading-empty">{{ t.ui.noTrace }}</div>
                 <div v-else class="trace-list">
                   <article
                     v-for="(trace, index) in traces"
@@ -1667,7 +1690,7 @@ const InfoTip = (props: { text: string }) =>
               </div>
             </section>
 
-            <section class="panel resizable-panel diagnosis-panel mt-16">
+            <section v-show="report && activeTab === 'diagnosis'" :id="`${tabId}-panel-diagnosis`" role="tabpanel" :aria-labelledby="`${tabId}-tab-diagnosis`" class="panel diagnosis-panel">
               <div class="panel-title">
                 <h2>{{ t.ui.diagnosis }}</h2>
                 <n-space :wrap="false" size="small">
@@ -1682,14 +1705,55 @@ const InfoTip = (props: { text: string }) =>
                   </n-button>
                 </n-space>
               </div>
-              <div ref="diagnosisRef" class="markdown-body export-surface" v-html="renderedMarkdown"></div>
+              <div v-if="!aiOutput" class="empty reading-empty">
+                <strong>{{ busy ? status : t.ui.noDiagnosis }}</strong>
+                <n-button v-if="busy" secondary @click="activeTab = 'trace'">{{ t.ui.trace }}</n-button>
+                <n-button v-else secondary @click="aiSettingsOpen = true">{{ t.ui.aiSettings }}</n-button>
+              </div>
+              <div v-show="aiOutput" ref="diagnosisRef" class="markdown-body export-surface" v-html="renderedMarkdown"></div>
             </section>
 
           </n-layout>
         </n-layout>
       </n-layout>
 
-      <n-modal v-model:show="diagnosisFullscreen" display-directive="show">
+      <n-modal v-model:show="aiSettingsOpen" preset="card" class="bkmsa-scope ai-settings-dialog" :aria-label="t.ui.aiSettings" :data-theme="themeMode" :bordered="false" content-style="padding: 0;">
+            <section class="bkmsa-scope panel ai-settings-panel" :data-theme="themeMode">
+              <div class="panel-title">
+                <h2>{{ t.ui.aiSettings }}</h2>
+                <div class="panel-title-actions">
+                  <n-button size="small" secondary :loading="aiConfigSaving" :disabled="aiConfigSaving" @click="saveLocalAiConfig">{{ t.ui.saveAiConfig }}</n-button>
+                  <n-button size="small" quaternary @click="aiSettingsOpen = false">{{ t.ui.close }}</n-button>
+                </div>
+              </div>
+              <n-select :value="providerId" :options="providerOptions" @update:value="applyProvider" />
+              <n-input v-model:value="baseUrl" class="mt-10" :placeholder="t.ui.baseUrlPlaceholder" />
+              <n-input v-model:value="apiKey" class="mt-10" type="password" show-password-on="click" :placeholder="t.ui.apiKeyPlaceholder" />
+              <div class="model-row mt-10">
+                <n-select
+                  v-model:value="model"
+                  :options="modelOptions"
+                  :placeholder="t.ui.modelPlaceholder"
+                  filterable
+                  tag
+                />
+                <n-button :loading="fetchingModels" secondary @click="fetchModels">{{ t.ui.getModels }}</n-button>
+              </div>
+              <n-collapse class="mt-10 ai-advanced">
+                <n-collapse-item :title="t.ui.advancedAi" name="advanced-ai">
+                  <div class="field-label">
+                    <span>{{ t.ui.temperature }}</span>
+                    <n-text depth="3">{{ t.ui.temperatureTip }}</n-text>
+                  </div>
+                  <n-input-number v-model:value="temperature" class="full" :min="0" :max="2" :step="0.1" />
+                </n-collapse-item>
+              </n-collapse>
+              <p class="settings-note mt-12">{{ t.ui.aiTip }}</p>
+              <n-button class="mt-12" secondary :loading="testing" @click="testAi">{{ t.ui.test }}</n-button>
+            </section>
+      </n-modal>
+
+      <n-modal v-model:show="diagnosisFullscreen" preset="card" class="bkmsa-scope fullscreen-dialog" :aria-label="t.ui.diagnosis" :data-theme="themeMode" :bordered="false" content-style="padding: 0;">
         <section class="bkmsa-scope fullscreen-diagnosis" :data-theme="themeMode">
           <header>
             <h2>{{ t.ui.diagnosis }}</h2>

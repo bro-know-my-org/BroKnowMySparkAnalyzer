@@ -16,6 +16,7 @@ vi.mock("naive-ui", async (importOriginal) => {
     ...actual,
     NCollapse: slotContainer("NCollapse"),
     NCollapseItem: slotContainer("NCollapseItem"),
+    NModal: slotContainer("NModal"),
     createDiscreteApi: () => ({ message: { success: vi.fn(), warning: vi.fn(), error: vi.fn() } }),
   };
 });

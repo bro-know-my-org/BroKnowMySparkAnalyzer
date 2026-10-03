@@ -55,6 +55,24 @@ async function startAnalysis() {
 
 const trace: AgentTrace = { round: 0, role: "tool", title: "Tool: report_inventory", content: "{}" };
 
+it("ignores repeated Enter submissions until the report fetch settles", async () => {
+  const run = await startAnalysis();
+  let finish!: (report: Awaited<ReturnType<SparkAnalyzerAdapter["fetchReport"]>>) => void;
+  const pending = new Promise<Awaited<ReturnType<SparkAnalyzerAdapter["fetchReport"]>>>((resolve) => { finish = resolve; });
+  run.adapter.fetchReport.mockImplementationOnce(() => pending);
+  const source = wrapper.findAllComponents(NInput)
+    .find((field) => String(field.props("placeholder")).includes("spark viewer"))!;
+  await source.trigger("keydown", { key: "Enter" });
+  await source.trigger("keydown", { key: "Enter" });
+  await source.trigger("keydown", { key: "Enter" });
+  expect(run.adapter.fetchReport).toHaveBeenCalledTimes(2);
+  finish({ reportId: "next-report", kind: "text", source: "next", summary: { title: "next", findings: [] } });
+  await flushPromises();
+  await source.trigger("keydown", { key: "Enter" });
+  await flushPromises();
+  expect(run.adapter.fetchReport).toHaveBeenCalledTimes(3);
+});
+
 it("renders each trace while the report is pending and reconciles without duplicates", async () => {
   const run = await startAnalysis();
   run.onTrace(trace);

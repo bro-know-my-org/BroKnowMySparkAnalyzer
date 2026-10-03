@@ -6,7 +6,6 @@
           <div class="title-row">
             <h1>BroKnowMySparkAnalyzer</h1>
           </div>
-          <p class="eyebrow">Spark Agent Workbench</p>
         </div>
       </div>
       <div class="window-controls" @pointerdown.stop @mousedown.stop>
@@ -79,12 +78,26 @@ function startWindowDrag(event: MouseEvent) {
 }
 
 .standalone-shell {
+  font-family: Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --page: #f6f7f9;
+  --surface: #ffffff;
+  --border: #e3e7ed;
+  --text: #202b3d;
+  --muted: #66748a;
   display: flex;
   flex-direction: column;
   height: 100vh;
   min-height: 0;
   overflow: hidden;
   background: var(--page);
+}
+
+.standalone-shell:has(.app-shell[data-theme="dark"]) {
+  --page: #141820;
+  --surface: #1b2029;
+  --border: #303846;
+  --text: #e5eaf3;
+  --muted: #a0abbd;
 }
 
 .standalone-titlebar {
@@ -111,6 +124,24 @@ function startWindowDrag(event: MouseEvent) {
   min-height: 0;
   flex: 1 1 auto;
 }
+
+.title-stack h1 {
+  margin: 0;
+  color: var(--text, #202b3d);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.window-controls { display: flex; align-self: stretch; }
+.window-control {
+  width: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--muted, #66748a);
+  font-size: 15px;
+}
+.window-control:hover { background: var(--border); }
+.window-control.close:hover { color: white; background: #c42b1c; }
 
 @media (max-width: 820px) {
   :global(html),
