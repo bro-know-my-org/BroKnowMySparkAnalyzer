@@ -18,4 +18,4 @@ export BKMSA_MODEL="gpt-4.1-mini"
 bkmsa analyze report.sparkprofile
 ```
 
-See the repository README for all commands, configuration options, supported report types, Web/desktop usage, and release downloads.
+See the [CLI guide](https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer/blob/master/docs/CLI.md) for configuration, report tools, output formats, and stdin. The [repository README](https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer/blob/master/README.md) covers supported report types, Web/desktop usage, and release downloads. Run `bkmsa --help` or `bkmsa <command> --help` for command options.
