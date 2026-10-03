@@ -5,6 +5,7 @@ dist/
 public/bkmsa-wasm/
 src-tauri/target/
 src-tauri/gen/
+/test-data/spark/
 
 *.log
 *.tmp
