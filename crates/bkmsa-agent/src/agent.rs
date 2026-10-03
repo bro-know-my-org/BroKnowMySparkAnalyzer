@@ -157,7 +157,11 @@ where
                 round,
                 role: TraceRole::Assistant,
                 title: "AI".into(),
-                content: content.clone(),
+                content: if evidence::validate_output(&content).is_some() {
+                    "回答包含未经支持的命令或格式，已隐藏；正在校验并尝试改写。".into()
+                } else {
+                    content.clone()
+                },
             },
         );
 
@@ -328,9 +332,23 @@ pub async fn ask_follow_up<C: ChatClient>(
     );
     messages.push(ChatMessage::user(question));
     compact_messages(&mut messages);
-    let content = client.chat(&messages).await?;
-    validate_response_size(&content)?;
-    Ok(content)
+    for attempt in 0..=2 {
+        let content = client.chat(&messages).await?;
+        validate_response_size(&content)?;
+        let Some(problem) = evidence::validate_output(&content) else {
+            return Ok(content);
+        };
+        if attempt == 2 {
+            break;
+        }
+        messages.push(ChatMessage::assistant(content));
+        messages.push(ChatMessage::user(format!(
+            "{}\n重新回答用户的追问，保留相关操作目的和验证方法。",
+            problem.correction(&EvidenceState::default())
+        )));
+        compact_messages(&mut messages);
+    }
+    Ok("回答未通过输出校验。请查安装版本的官方帮助确认 Spark 的具体操作；补采时请保持人数、区域和活动一致，并比较处理前后的 MSPT/TPS 与调用链。".into())
 }
 
 fn validate_options(options: &AgentOptions) -> Result<()> {
@@ -903,6 +921,27 @@ mod tests {
         }
     }
 
+    struct RecordingClient {
+        responses: Mutex<Vec<String>>,
+        requests: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl ChatClient for RecordingClient {
+        async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            Ok(self.responses.lock().unwrap().remove(0))
+        }
+    }
+
+    fn recording_client(responses: Vec<String>) -> RecordingClient {
+        RecordingClient {
+            responses: Mutex::new(responses),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
     fn text_report() -> FakeReport {
         FakeReport {
             context: ReportContext {
@@ -912,6 +951,10 @@ mod tests {
             },
             calls: Mutex::new(Vec::new()),
         }
+    }
+
+    async fn follow_up(client: &RecordingClient, prior: &str, question: &str) -> Result<String> {
+        ask_follow_up(&text_report().context, client, &[], prior, &[], question).await
     }
 
     #[test]
@@ -1204,5 +1247,98 @@ mod tests {
         assert!(result.reached_round_limit);
         assert_eq!(result.rounds, 1);
         assert!(!result.used_tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spark_commands_are_rewritten_and_hidden_from_streamed_and_saved_traces() {
+        let safe = "# 结论\n当前报告无法唯一定位\n# 优先处理\n保持人数和区域一致\n# 判断依据\n当前数据不足\n# 复测与补采\n采普通 CPU profile 120 秒，比较 MSPT/TPS。";
+        let invalid = safe.replace(
+            "采普通 CPU profile 120 秒",
+            "运行 `/spark healthreport --memory`",
+        );
+        let client = recording_client(vec![invalid, safe.into()]);
+        let mut streamed = Vec::new();
+        let result = run_tool_agent(&text_report(), &client, AgentOptions::default(), |trace| {
+            streamed.push(trace.clone())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.diagnosis, safe);
+        assert_eq!(result.rounds, 2);
+        for trace in streamed.iter().chain(&result.traces) {
+            assert!(!crate::commands::contains_spark_command(&trace.content));
+        }
+        let requests = client.requests.lock().unwrap();
+        assert!(requests[0][0].content.contains(crate::commands::POLICY));
+        assert!(requests[1]
+            .last()
+            .unwrap()
+            .content
+            .contains(crate::commands::POLICY));
+    }
+
+    #[tokio::test]
+    async fn command_validation_exhaustion_does_not_return_rejected_diagnosis() {
+        let client = recording_client(vec![
+            "# 结论\n数据不足\n# 优先处理\n执行 `/spark imaginary`\n# 判断依据\n数据不足\n# 复测与补采\n补采".into(),
+        ]);
+        let options = AgentOptions {
+            max_rounds: 1,
+            validation_round_limit: 1,
+            ..Default::default()
+        };
+        let result = run_analysis(&text_report(), &client, options)
+            .await
+            .unwrap();
+        assert!(result.diagnosis.contains("校验失败"));
+        assert!(!crate::commands::contains_spark_command(&result.diagnosis));
+        assert!(result.reached_round_limit);
+    }
+
+    #[tokio::test]
+    async fn follow_up_rewrites_commands_even_when_user_requests_them() {
+        let safe = "同人数、同区域下采普通 CPU profile 120 秒，比较 MSPT/TPS；具体写法查安装版本的官方帮助。";
+        let client = recording_client(vec![
+            "`spark profiler start --made-up`".into(),
+            "spark help 查看安装版本的帮助。".into(),
+            safe.into(),
+        ]);
+        let answer = follow_up(
+            &client,
+            "原诊断建议 `/spark healthreport --memory`",
+            "给我原诊断里的命令",
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, safe);
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0][0].content.contains(crate::commands::POLICY));
+        assert!(requests[1]
+            .last()
+            .unwrap()
+            .content
+            .contains(crate::commands::POLICY));
+    }
+
+    #[tokio::test]
+    async fn follow_up_has_bounded_retries_and_a_fixed_fallback() {
+        let client = recording_client(vec![
+            "`/spark:spark imaginary`".into(),
+            "<code>/spark healthreport --memory</code>".into(),
+            "<div>&#47;spark profiler start</div>".into(),
+        ]);
+        let answer = follow_up(&client, "诊断", "如何补采？").await.unwrap();
+        assert!(answer.contains("未通过输出校验"));
+        assert!(!crate::commands::contains_spark_command(&answer));
+        assert_eq!(client.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn follow_up_preserves_safe_answer_without_retry() {
+        let client = recording_client(vec!["使用 Spark TPS 数据与同期 GC 日志交叉核对。".into()]);
+        let answer = follow_up(&client, "诊断", "怎么核对 GC？").await.unwrap();
+        assert!(answer.contains("GC 日志"));
+        assert_eq!(client.requests.lock().unwrap().len(), 1);
     }
 }
