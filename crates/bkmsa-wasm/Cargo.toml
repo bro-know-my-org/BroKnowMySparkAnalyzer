@@ -7,6 +7,10 @@ repository.workspace = true
 description = "WebAssembly bindings for the bkmsa Spark analysis core"
 publish = false
 
+[package.metadata.wasm-pack.profile.release]
+# These instructions are emitted by the Rust toolchain used in release CI.
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
