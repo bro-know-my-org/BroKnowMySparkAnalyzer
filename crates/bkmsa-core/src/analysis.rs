@@ -496,7 +496,9 @@ pub(crate) fn is_generic_frame(label: &str) -> bool {
 
 pub(crate) fn classify_frame(label: &str) -> &'static str {
     let l = label.to_lowercase();
-    if l.contains("blockentity")
+    if is_client_render_frame(&l) {
+        "client_render"
+    } else if l.contains("blockentity")
         || l.contains("tileentity")
         || l.contains("tickingblockentity")
         || l.contains("catchtickingblockentity")
@@ -543,6 +545,22 @@ pub(crate) fn classify_frame(label: &str) -> &'static str {
     }
 }
 
+fn is_client_render_frame(lower_label: &str) -> bool {
+    [
+        "net.minecraft.client.renderer.",
+        "net.minecraft.client.gui.render.",
+        "com.mojang.blaze3d.",
+        "org.lwjgl.opengl.",
+        "net.caffeinemc.mods.sodium.client.render.",
+        "net.caffeinemc.mods.sodium.client.gl.",
+    ]
+    .iter()
+    .any(|prefix| lower_label.starts_with(prefix))
+        || lower_label.starts_with("net.minecraft.client.minecraft.renderframe")
+        || (lower_label.starts_with("me.cortex.voxy.client.core.")
+            && (lower_label.contains("render") || lower_label.contains("pipeline")))
+}
+
 pub(crate) fn is_io_frame(lower_label: &str) -> bool {
     lower_label.contains("filesystem")
         || lower_label.contains("java.io.")
@@ -556,6 +574,10 @@ pub(crate) fn is_io_frame(lower_label: &str) -> bool {
 
 pub(crate) fn is_server_thread_name(thread: &str) -> bool {
     thread.eq_ignore_ascii_case("server thread")
+}
+
+pub(crate) fn is_client_render_thread_name(thread: &str) -> bool {
+    thread.eq_ignore_ascii_case("render thread") || thread.eq_ignore_ascii_case("client thread")
 }
 
 pub(crate) fn is_server_thread_category(category: &str) -> bool {
@@ -572,6 +594,9 @@ pub(crate) fn is_server_thread_category(category: &str) -> bool {
 
 pub(crate) fn classify_hotspot(label: &str, thread: &str) -> String {
     let category = classify_frame(label);
+    if category == "client_render" && !is_client_render_thread_name(thread) {
+        return "background_client_render".into();
+    }
     if is_server_thread_category(category) && !is_server_thread_name(thread) {
         return match category {
             "block_entity" => "background_block_entity_sync".into(),

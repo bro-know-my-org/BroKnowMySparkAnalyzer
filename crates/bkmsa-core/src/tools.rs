@@ -259,7 +259,7 @@ fn overview(r: &Report) -> Value {
             .as_f64().map(|value| value / 1000.0);
         json!({"mode":mode,"tickLengthThresholdMs":threshold_ms,"includedTicks":metadata["dataAggregator"]["numberOfIncludedTicks"],"totalTicks":metadata["numberOfTicks"]})
     });
-    json!({"source":r.source,"kind":r.kind,"title":r.summary.title,"platform":r.summary.platform,"generatedAt":r.summary.generated_at,"durationSeconds":r.summary.duration_seconds,"sampling":sampling,"metrics":compact(m),"findings":r.summary.findings,"gc":r.summary.gc})
+    json!({"source":r.source,"kind":r.kind,"title":r.summary.title,"platform":r.summary.platform,"platformType":crate::environment::platform_type(&r.raw),"generatedAt":r.summary.generated_at,"durationSeconds":r.summary.duration_seconds,"sampling":sampling,"metrics":compact(m),"findings":r.summary.findings,"gc":r.summary.gc})
 }
 
 #[derive(Default)]

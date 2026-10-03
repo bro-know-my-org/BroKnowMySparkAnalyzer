@@ -224,7 +224,7 @@ fn gc_summary(gc: Option<&Map<String, Value>>) -> Vec<String> {
         .collect()
 }
 
-fn platform_type(raw: &Value) -> Option<Value> {
+pub(crate) fn platform_type(raw: &Value) -> Option<Value> {
     match path(raw, "metadata.platformMetadata.type")? {
         Value::String(value) if !value.is_empty() => Some(Value::String(value.clone())),
         Value::Number(value) => Some(Value::String(

@@ -1354,6 +1354,8 @@ function categoryDisplayName(category: string) {
   const zh: Record<string, string> = {
     other: "框架/其他",
     world_tick: "世界 tick",
+    client_render: "客户端渲染",
+    background_client_render: "后台渲染工作",
     entity_tick: "实体 tick",
     entity_ai_pathfinding: "实体 AI/寻路",
     chunk_task: "区块任务",

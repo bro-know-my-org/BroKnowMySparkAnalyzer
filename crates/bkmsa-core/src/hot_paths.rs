@@ -1,6 +1,7 @@
 use crate::analysis::{
-    arr_at, classify_frame, classify_hotspot, f64_at, i64_at, is_generic_frame, is_io_frame,
-    is_server_thread_category, is_server_thread_name, obj_at, str_at,
+    arr_at, classify_frame, classify_hotspot, f64_at, i64_at, is_client_render_thread_name,
+    is_generic_frame, is_io_frame, is_server_thread_category, is_server_thread_name, obj_at,
+    str_at,
 };
 use crate::Report;
 use serde_json::{json, Value};
@@ -171,8 +172,59 @@ fn category_matches(label: &str, category: &str) -> bool {
 fn actionable(category: &str) -> bool {
     matches!(
         category,
-        "entity_tick" | "entity_ai_pathfinding" | "chunk_task" | "block_entity" | "commands" | "io"
+        "entity_tick"
+            | "entity_ai_pathfinding"
+            | "chunk_task"
+            | "block_entity"
+            | "commands"
+            | "io"
+            | "client_render"
     )
+}
+
+fn depth_limit(category: &str) -> usize {
+    if category == "client_render" {
+        MAX_DEPTH * 2
+    } else {
+        MAX_DEPTH
+    }
+}
+
+// Inclusive parent frames must not consume every slot before another mod is shown.
+fn limit_render_sources(items: &mut Vec<Value>, source_key: &str, limit: usize) {
+    let mut sources = HashSet::new();
+    let mut selected = HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let source = item[source_key].as_str().unwrap_or("unknown");
+        let label_key = if source_key == "sourceId" {
+            "label"
+        } else {
+            "terminalLabel"
+        };
+        let unknown_render = source == "unknown"
+            && category_matches(
+                item[label_key].as_str().unwrap_or_default(),
+                "client_render",
+            );
+        if (source != "unknown" || unknown_render) && sources.insert(source) {
+            selected.insert(index);
+            if selected.len() == limit {
+                break;
+            }
+        }
+    }
+    for index in 0..items.len() {
+        if selected.len() >= limit {
+            break;
+        }
+        selected.insert(index);
+    }
+    let mut index = 0;
+    items.retain(|_| {
+        let keep = selected.contains(&index);
+        index += 1;
+        keep
+    });
 }
 
 fn find_anchors<'a>(report: &'a Report, category: &str) -> Vec<Anchor<'a>> {
@@ -190,10 +242,14 @@ fn find_anchors<'a>(report: &'a Report, category: &str) -> Vec<Anchor<'a>> {
     ) {
         let Some(node) = nodes.get(index) else { return };
         *work += 1;
-        if depth > MAX_DEPTH || *work > 100_000 || !seen.insert(index) {
+        if depth > depth_limit(category) || *work > 100_000 || !seen.insert(index) {
             return;
         }
-        if category_matches(&stack_label(node), category) {
+        let label = stack_label(node);
+        if category_matches(&label, category)
+            && (category != "client_render"
+                || (!is_generic_frame(&label) && !client_wrapper(&label)))
+        {
             let candidate_samples = sum_times(node);
             let candidate = Anchor {
                 thread,
@@ -234,6 +290,9 @@ fn find_anchors<'a>(report: &'a Report, category: &str) -> Vec<Anchor<'a>> {
     let mut out = Vec::new();
     for thread in arr_at(&report.raw, "threads").into_iter().flatten() {
         let name = str_at(thread, "name").unwrap_or("unknown");
+        if category == "client_render" && !is_client_render_thread_name(name) {
+            continue;
+        }
         if is_server_thread_category(category) && !is_server_thread_name(name) {
             continue;
         }
@@ -355,8 +414,17 @@ fn wrapper(label: &str) -> bool {
     lower.contains("neruina") || lower.contains("observable") || lower.contains("catchticking")
 }
 
+fn client_wrapper(label: &str) -> bool {
+    let lower = label.to_lowercase();
+    wrapper(label) || lower.contains("wrapoperation$") || lower.contains("wrapmethod$")
+}
+
 fn skip_frame(label: &str, category: &str) -> bool {
-    if is_generic_frame(label) || category_matches(label, category) || label.contains("$$Lambda/") {
+    if is_generic_frame(label)
+        || (category_matches(label, category) && category != "client_render")
+        || label.contains("$$Lambda/")
+        || (category == "client_render" && (client_wrapper(label) || render_entry(label)))
+    {
         return true;
     }
     category == "entity_tick"
@@ -371,7 +439,11 @@ fn skip_frame(label: &str, category: &str) -> bool {
 }
 
 fn concrete_terminal(label: &str, source: &str, category: &str) -> bool {
-    if wrapper(label) || category_matches(label, category) || is_generic_frame(label) {
+    if wrapper(label)
+        || (category_matches(label, category) && category != "client_render")
+        || is_generic_frame(label)
+        || (category == "client_render" && (client_wrapper(label) || render_entry(label)))
+    {
         return false;
     }
     source != "unknown"
@@ -380,6 +452,10 @@ fn concrete_terminal(label: &str, source: &str, category: &str) -> bool {
             && (label.to_lowercase().contains(".world.entity.")
                 || label.to_lowercase().contains(".entity.")
                 || label.to_lowercase().contains(".mobs.entity.")))
+}
+
+fn render_entry(label: &str) -> bool {
+    label.starts_with("net.minecraft.client.Minecraft.renderFrame")
 }
 
 fn flame_frame(report: &Report, node: &Value, samples: f64) -> Value {
@@ -415,13 +491,14 @@ fn descendant_frames(
         category: &str,
         seen: &mut HashSet<usize>,
         groups: &mut HashMap<String, Value>,
+        sources: &mut HashMap<String, Value>,
         work: &mut usize,
     ) {
         let Some(node) = anchor.nodes.get(index) else {
             return;
         };
         *work += 1;
-        if depth > MAX_DEPTH || *work > MAX_DESCENDANT_VISITS || !seen.insert(index) {
+        if depth > depth_limit(category) || *work > MAX_DESCENDANT_VISITS || !seen.insert(index) {
             return;
         }
         let label = stack_label(node);
@@ -440,14 +517,30 @@ fn descendant_frames(
                 .get(&key)
                 .and_then(|value| f64_at(value, "maxPercent"))
                 .is_none_or(|old| percent > old);
-            if replace && (groups.contains_key(&key) || groups.len() < MAX_DESCENDANT_GROUPS) {
-                groups.insert(key, json!({
+            let keep_group =
+                replace && (groups.contains_key(&key) || groups.len() < MAX_DESCENDANT_GROUPS);
+            let keep_source = category == "client_render"
+                && source_id != "unknown"
+                && sources
+                    .get(&source_id)
+                    .is_none_or(|old| percent > old["maxPercent"].as_f64().unwrap_or_default())
+                && (sources.contains_key(&source_id) || sources.len() < MAX_DESCENDANT_GROUPS);
+            if keep_group || keep_source {
+                let frame = json!({
                     "label":label,"className":class,"methodName":method,
                     "sourceId":source_id,"sourceName":source_name,
                     "sourceVersion":obj_at(&report.raw,"metadata.sources").and_then(|sources|sources.get(&source_id)).and_then(|meta|str_at(meta,"version")),
                     "samples":samples,"maxPercent":percent,
                     "role":frame_role(&label,method),
-                }));
+                });
+                if keep_group && keep_source {
+                    sources.insert(source_id, frame.clone());
+                    groups.insert(key, frame);
+                } else if keep_group {
+                    groups.insert(key, frame);
+                } else {
+                    sources.insert(source_id, frame);
+                }
             }
         }
         for child in child_refs(node, "childrenRefs", anchor.nodes.len()) {
@@ -459,11 +552,13 @@ fn descendant_frames(
                 category,
                 seen,
                 groups,
+                sources,
                 work,
             );
         }
     }
     let mut groups = HashMap::new();
+    let mut sources = HashMap::new();
     let mut work = 0usize;
     for anchor in anchors {
         if work >= MAX_DESCENDANT_VISITS {
@@ -477,7 +572,18 @@ fn descendant_frames(
             category,
             &mut HashSet::new(),
             &mut groups,
+            &mut sources,
             &mut work,
+        );
+    }
+    for frame in sources.into_values() {
+        groups.insert(
+            format!(
+                "{}|{}",
+                frame["label"].as_str().unwrap_or_default(),
+                frame["sourceId"].as_str().unwrap_or_default()
+            ),
+            frame,
         );
     }
     let mut frames = groups.into_values().collect::<Vec<_>>();
@@ -486,7 +592,11 @@ fn descendant_frames(
             .unwrap_or_default()
             .total_cmp(&f64_at(left, "maxPercent").unwrap_or_default())
     });
-    frames.truncate(limit);
+    if category == "client_render" {
+        limit_render_sources(&mut frames, "sourceId", limit);
+    } else {
+        frames.truncate(limit);
+    }
     frames
 }
 
@@ -505,7 +615,7 @@ fn compact_chain(report: &Report, anchor: &Anchor<'_>, path: &[usize]) -> Vec<Va
                 "terminal"
             } else if id == "neruina" {
                 "safety_wrapper"
-            } else if wrapper(&label) {
+            } else if client_wrapper(&label) {
                 "wrapper"
             } else {
                 "callee"
@@ -538,6 +648,7 @@ fn call_chains(
         seen: &mut HashSet<usize>,
         depth: usize,
         out: &mut Vec<Value>,
+        sources: &mut HashMap<String, Value>,
         work: &mut usize,
         max_output: usize,
     ) {
@@ -545,7 +656,11 @@ fn call_chains(
             return;
         };
         *work += 1;
-        if depth > MAX_DEPTH || *work > 100_000 || out.len() >= max_output || !seen.insert(index) {
+        if depth > depth_limit(category)
+            || *work > 100_000
+            || (category != "client_render" && out.len() >= max_output)
+            || !seen.insert(index)
+        {
             return;
         }
         path.push(index);
@@ -553,12 +668,30 @@ fn call_chains(
         let (source_id, source_name) = source_for_node(report, node);
         if concrete_terminal(&label, &source_id, category) {
             let samples = sum_times(node);
-            let path_json = compact_chain(report, anchor, path);
-            out.push(json!({
+            let percent = if anchor.thread_samples > 0.0 {
+                samples / anchor.thread_samples * 100.0
+            } else {
+                0.0
+            };
+            let source_replacement = category == "client_render"
+                && sources.get(&source_id).is_none_or(|old| {
+                    percent > old["terminalPercent"].as_f64().unwrap_or_default()
+                })
+                && (sources.contains_key(&source_id) || sources.len() < max_output);
+            if source_replacement || out.len() < max_output {
+                let path_json = compact_chain(report, anchor, path);
+                let chain = json!({
                 "terminalLabel":label,"terminalSourceId":source_id,"terminalSourceName":source_name,
-                "terminalPercent":if anchor.thread_samples>0.0{samples/anchor.thread_samples*100.0}else{0.0},
+                "terminalPercent":percent,
                 "samples":samples,"thread":anchor.thread,"path":path_json,
-            }));
+                });
+                if source_replacement {
+                    sources.insert(source_id, chain.clone());
+                }
+                if out.len() < max_output {
+                    out.push(chain);
+                }
+            }
         }
         for child in child_refs(node, "childrenRefs", anchor.nodes.len()) {
             visit(
@@ -570,6 +703,7 @@ fn call_chains(
                 &mut seen.clone(),
                 depth + 1,
                 out,
+                sources,
                 work,
                 max_output,
             );
@@ -577,6 +711,7 @@ fn call_chains(
         path.pop();
     }
     let mut all = Vec::new();
+    let mut sources = HashMap::new();
     let mut work = 0;
     let max_output = limit.saturating_mul(8).clamp(64, 8_000);
     for anchor in anchors.iter().take(ANCHOR_LIMIT) {
@@ -589,10 +724,12 @@ fn call_chains(
             &mut HashSet::new(),
             0,
             &mut all,
+            &mut sources,
             &mut work,
             max_output,
         );
     }
+    all.extend(sources.into_values());
     let mut unique = HashMap::new();
     for chain in all {
         let key = chain["path"]
@@ -617,7 +754,11 @@ fn call_chains(
             .unwrap_or_default()
             .total_cmp(&f64_at(left, "terminalPercent").unwrap_or_default())
     });
-    chains.truncate(limit);
+    if category == "client_render" {
+        limit_render_sources(&mut chains, "terminalSourceId", limit);
+    } else {
+        chains.truncate(limit);
+    }
     chains
 }
 
@@ -1221,6 +1362,119 @@ mod tests {
                 }],
                 ..Default::default()
             },
+        }
+    }
+
+    #[test]
+    fn client_render_paths_survive_normal_tick_metrics_and_exclude_workers() {
+        let mut report = fixture();
+        report.raw["metadata"]["platformMetadata"] = json!({"type":1});
+        report.raw["metadata"]["sources"]["voxy"] = json!({"name":"Voxy"});
+        report.raw["classSources"]["me.cortex.voxy.client.core.VoxyRenderSystem"] = json!("voxy");
+        let mut render = json!({"name":"Render thread","times":[100.0],"childrenRefs":[0],"children":[
+            {"className":"net.minecraft.client.Minecraft","methodName":"renderFrame","times":[90.0],"childrenRefs":[1]},
+            {"className":"net.minecraft.client.renderer.LevelRenderer","methodName":"wrapOperation$flashback$renderChunkGroup","times":[70.0],"childrenRefs":[2]},
+            {"className":"me.cortex.voxy.client.core.VoxyRenderSystem","methodName":"renderOpaque","times":[30.0],"childrenRefs":[3]},
+            {"className":"org.lwjgl.opengl.GL32C","methodName":"nglMultiDrawElementsBaseVertex","times":[20.0],"childrenRefs":[]}
+        ]});
+        // Deep wrapper/helper stacks must not hide the actual renderer.
+        render["children"][1]["childrenRefs"] = json!([4]);
+        let nodes = render["children"].as_array_mut().unwrap();
+        for index in 0..80 {
+            nodes.push(json!({"className":format!("example.Helper{index}"),"methodName":"forward","times":[30.0],"childrenRefs":[if index == 79 { 2 } else { index + 5 }]}));
+        }
+        let mut worker = render.clone();
+        worker["name"] = json!("Chunk render worker");
+        report.raw["threads"]
+            .as_array_mut()
+            .unwrap()
+            .extend([render, worker]);
+        report.summary = crate::analysis::summarize(ReportKind::Sampler, &report.raw, "fixture");
+        report.summary.tps1m = Some(20.0);
+        report.summary.mspt_median = Some(1.9);
+        let overview = crate::execute_tool(&report, "overview", json!({})).unwrap();
+        assert_eq!(overview["platformType"], "CLIENT");
+        let value = execute(&report, "auto", 64);
+        assert!(value["selectedCategories"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("client_render")));
+        let render_chains = value["callChains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|chain| chain["category"] == "client_render")
+            .collect::<Vec<_>>();
+        assert!(!render_chains.is_empty());
+        assert!(render_chains
+            .iter()
+            .all(|chain| chain["thread"] == "Render thread"));
+        assert!(value["attribution"]["topSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["sourceId"] == "voxy"));
+        assert!(value["categories"]
+            .to_string()
+            .contains("nglMultiDrawElementsBaseVertex"));
+    }
+
+    #[test]
+    fn nested_render_frames_do_not_crowd_out_an_independent_branch() {
+        let mut report = fixture();
+        let sodium_class = "net.caffeinemc.mods.sodium.client.render.Renderer";
+        let voxy_class = "me.cortex.voxy.client.core.VoxyRenderSystem";
+        report.raw["classSources"][sodium_class] = json!("sodium");
+        report.raw["classSources"][voxy_class] = json!("voxy");
+        let mut nodes = (0..20)
+            .map(|index| {
+                json!({
+                    "className":sodium_class,"methodName":format!("render{index}"),
+                "times":[60.0],"childrenRefs":if index < 19 {vec![index + 1]} else {vec![]}
+                })
+            })
+            .collect::<Vec<_>>();
+        nodes.push(json!({"className":voxy_class,"methodName":"renderOpaque","times":[20.0],"childrenRefs":[]}));
+        // Fill the candidate budgets before the independent branch is visited.
+        let filler_start = nodes.len();
+        nodes[19]["childrenRefs"] =
+            json!((filler_start..filler_start + MAX_DESCENDANT_GROUPS).collect::<Vec<_>>());
+        for index in 0..MAX_DESCENDANT_GROUPS {
+            nodes.push(json!({"className":sodium_class,"methodName":format!("helper{index}"),"times":[0.001],"childrenRefs":[]}));
+        }
+        report.raw["threads"] = json!([{
+            "name":"Render thread","times":[100.0],"childrenRefs":[0,20],"children":nodes
+        }]);
+        let result = execute(&report, "client_render", 16);
+        assert_eq!(result["anchors"].as_array().unwrap().len(), 2);
+        let chains = result["callChains"].as_array().unwrap();
+        assert_eq!(chains.len(), 16);
+        assert!(chains.iter().any(|chain| {
+            chain["terminalSourceId"] == "voxy" && chain["terminalPercent"] == 20.0
+        }));
+        report.summary = crate::analysis::summarize(ReportKind::Sampler, &report.raw, "fixture");
+        let auto = execute(&report, "auto", 16);
+        assert!(auto["attribution"]["topSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["sourceId"] == "voxy" && source["maxPercent"] == 20.0));
+    }
+
+    #[test]
+    fn server_wrapping_method_leaves_remain_source_evidence() {
+        for method in ["wrapOperation$abc$tick", "wrapMethod$abc$tick"] {
+            let mut report = fixture();
+            report.raw["threads"][0]["children"][3]["methodName"] = json!(method);
+            let result = execute(&report, "auto", 64);
+            assert!(result["callChains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|chain| {
+                    chain["terminalSourceId"] == "create"
+                        && chain["terminalLabel"].as_str().unwrap().contains(method)
+                }));
         }
     }
 
