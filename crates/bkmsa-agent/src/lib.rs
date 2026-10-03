@@ -1,5 +1,6 @@
 mod agent;
 mod client;
+mod commands;
 mod config;
 mod error;
 mod evidence;
