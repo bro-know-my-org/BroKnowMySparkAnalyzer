@@ -62,13 +62,19 @@ it("ignores repeated Enter submissions until the report fetch settles", async ()
   run.adapter.fetchReport.mockImplementationOnce(() => pending);
   const source = wrapper.findAllComponents(NInput)
     .find((field) => String(field.props("placeholder")).includes("spark viewer"))!;
-  await source.trigger("keydown", { key: "Enter" });
-  await source.trigger("keydown", { key: "Enter" });
-  await source.trigger("keydown", { key: "Enter" });
+  // NInput is shallow-stubbed; emit its component event instead of dispatching
+  // a DOM event on the generated stub element.
+  async function pressEnter() {
+    source.vm.$emit("keydown", new KeyboardEvent("keydown", { key: "Enter" }));
+    await nextTick();
+  }
+  await pressEnter();
+  await pressEnter();
+  await pressEnter();
   expect(run.adapter.fetchReport).toHaveBeenCalledTimes(2);
   finish({ reportId: "next-report", kind: "text", source: "next", summary: { title: "next", findings: [] } });
   await flushPromises();
-  await source.trigger("keydown", { key: "Enter" });
+  await pressEnter();
   await flushPromises();
   expect(run.adapter.fetchReport).toHaveBeenCalledTimes(3);
 });
