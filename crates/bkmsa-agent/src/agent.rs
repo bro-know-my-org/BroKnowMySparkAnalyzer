@@ -1149,10 +1149,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preload_drills_down_only_for_relevant_report_symptoms() {
+    async fn preload_inspects_cpu_even_when_tick_metrics_are_normal() {
         for (kind, median, cpu) in [
             (ReportKind::Sampler, 110, true),
-            (ReportKind::Sampler, 1, false),
+            (ReportKind::Sampler, 1, true),
             (ReportKind::Health, 110, false),
             (ReportKind::Heap, 110, false),
         ] {

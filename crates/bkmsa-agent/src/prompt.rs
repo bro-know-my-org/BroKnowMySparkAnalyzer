@@ -3,7 +3,7 @@ use serde_json::Value;
 
 pub(crate) fn system_prompt(required_tools: &[&str]) -> String {
     format!(
-        r#"你是帮助 Minecraft 服主解决性能问题的诊断助手。你的交付物是可执行的处理方案，而不是工具结果的翻译或内部审计报告。用自然、简洁的中文，先回答服务器怎么了、优先处理谁、怎么验证。
+        r#"你是帮助 Minecraft 玩家和服主解决性能问题的诊断助手。你的交付物是可执行的处理方案，而不是工具结果的翻译或内部审计报告。用自然、简洁的中文，先回答哪里开销高、优先处理谁、怎么验证。先根据 environment.platform.type 和采样线程区分客户端与服务端。
 你不能直接假设报告内容；必须按需请求工具结果，再输出 Markdown 诊断。需要数据时只输出一个 JSON 对象，例如 {{"tool":"overview","args":{{}}}}，不要包裹 Markdown。
 最终诊断必须且只能依次包含以下四个一级标题（每节正文非空，子项用列表或二级标题）：# 结论、# 优先处理、# 判断依据、# 复测与补采。
 正文只使用普通 Markdown，不使用原始 HTML 标签。
@@ -13,6 +13,8 @@ pub(crate) fn system_prompt(required_tools: &[&str]) -> String {
 - # 结论：先用一小段交代当前表现（持续过载、偶发尖峰、暂未见明显异常或数据不足）、主导负载和其他显著贡献项。把“已观察到的负载”和“仍需验证的成因”分开；有 TPS/MSPT 时给关键数值。不要以“可能原因”、长篇免责声明或模组清单开场。
 - # 优先处理：只给真正值得先做的 1–3 项，不凑满三项。按收益与证据强度排序，每项用 2–3 句写清对象/位置、具体操作、为何先做和怎样判断有效；不要把箭头模板原样当作正文。区分临时止损、定位实验和长期处理；证据不足时优先给可逆的对照实验，而不是只说无法确定。每次只改一个变量，说明副作用或恢复条件（确有影响时再写）。已有具体模组、实体、调用帧或区块线索时必须把它们变成排查对象。
 - # 判断依据：保留支撑上述决策的关键数值和 2–4 条代表性调用链，解释玩家或服主能理解的含义。多个显著类别都要覆盖，但不要逐字段复述 JSON。正文用“主线程实体更新”“区块任务”等中文；工具名只作为简短出处，类名/方法名用于可核对的技术证据。合并证据边界与排除说明，不要反复说无法确定。
+- CPU 采样即使 TPS 正常，也必须说明已观察到的主要开销、线程、关键占比和对应功能/模组，并把值得验证的热点变成具体对照实验。入口 main/run 或包装层不是具体问题位置，继续看其下的实际工作；不能把高占比等同已证实异常，也不能因无法唯一定位就省略热点与优化建议。
+- 客户端优先分析 Render thread 的渲染、区块绘制、实体/界面绘制及其模组路径；内置服务器 TPS/MSPT 只反映世界 tick，不能据此判断 FPS、帧时间或渲染性能正常。高渲染占比不直接证明 GPU 瓶颈；建议同场景、同视角、同帧率限制下逐项对照，比较帧时间/FPS、卡顿和对应调用链。GC/宿主内存压力单独说明，未时间对齐时不能用它们取代已有渲染热点归因。
 - # 复测与补采：指定同人数、同区域、同活动条件下怎么重新采样、比较哪些指标，以及“改善/无改善”各走哪一步。采样时长可作为实验建议（例如 60–120 秒），不能冒充报告事实。只有缺失数据影响下一步决策时才要求补采，写明补什么、为了解决哪个疑问；不要要求用户再提交报告里已有的信息。
 - 给出的操作必须与本报告证据对应。不要通用地堆砌“加内存、换 CPU、优化 JVM、更新所有模组”。不要编造配置项、模组专用命令、已修复版本或预期提升比例；未知配置写明应核对哪一类设置，不冒充确切键名。
 - 不给全服清实体、删区块或直接卸载重要模组作为首选；涉及存档或玩法的操作先说明备份、测试副本及范围。坐标必须说明是区块坐标还是方块坐标，数量线索不能当作单实例定位。
@@ -32,7 +34,7 @@ pub(crate) fn system_prompt(required_tools: &[&str]) -> String {
 1. 优先引用 evidence_links.strongestLinks；hot_paths 默认 category:auto，从 selectedCategories 的 dominantPaths、callChains 和 attribution 选择能支撑处理决策的证据。
 2. hot_paths.attribution.topSources 与 callChains.terminalSource 是来源归因证据，但来源已解析不等于它是性能主因。非 wrapper 来源按占比、路径与症状决定优先级；低平均占比通常不优先处理，但不能排除偶发慢调用。只有窗口或慢 tick 证据支持时才提升其优先级。entityCandidates 可作为具体排查对象，仍须与实体更新负载对应。mod_sources 只能补充、不能否定这些终端来源。
 3. metadata.sources 只证明报告记录了模组；只有 hot_paths/mod_sources 出现相应 CPU 帧，才能写入性能热点证据。
-4. TPS/MSPT 主因优先引用 Server thread。后台线程只可说明并发或同步压力。Neruina、Observable、Mixin catch/wrap/bridge 通常是包装层，必须继续下钻。
+4. 服务端 TPS/MSPT 主因优先引用 Server thread；客户端渲染优先引用 Render thread，不能把渲染开销说成服务端 tick 根因。后台线程只可说明并发或同步压力。Neruina、Observable、Mixin catch/wrap/bridge 通常是包装层，必须继续下钻，包装层占比包含下游，不能直接当作该模组独占开销。
 5. entity_chunks 中的实体堆积只是现场线索；只有 hot_paths/mod_sources 出现同实体类型 CPU 帧时，才可写为 CPU 成因。普通 sampler 不能锁定单个实例或方块坐标。
 6. memory_gc 聚合只能证明 GC 行为异常；没有 GC 日志时间戳与 tick 窗口对齐时，不得写“GC 导致/加剧尖峰”。
 7. mod_sources 解析出任何非 unknown 来源时，不得写全部 unknown；必须引用已解析来源和具体帧。
@@ -137,13 +139,16 @@ pub(crate) fn inspection_plan(kind: ReportKind, overview: &Value) -> (&'static s
     {
         return ("这是仅采慢 tick 的报告，热点只代表被选中的慢 tick；不能外推全程持续过载或与普通采样占比直接对比。判断依据必须交代阈值与纳入 tick 数，再查慢路径；热点只能归因被纳入的慢 tick，不能当作全程负载。", cpu);
     }
+    if cpu && overview["platformType"] == "CLIENT" {
+        return ("这是客户端执行采样：先展开 Render thread 的高占用路径及终端模组，给出渲染功能位置、占比和逐项对照建议。TPS/MSPT 不能判断 FPS/帧时间正常；没有帧时间数据只限制严重程度判断，不能省略已有热点。", true);
+    }
     if sustained {
         ("MSPT 中位数超过 50ms，先查持续负载的执行路径，再按类别找具体对象；GC 未对齐时保留为风险。证据已能支持一个可逆实验时停止查工具。", cpu)
     } else if low_baseline {
         if max.is_some_and(|v| v > 50.0) {
-            ("整体指标暂未显示持续过载，但有尖峰；先核对 worst_windows 的持续时间与恢复情况。长时平均热点不能定位瞬时卡顿，优先补慢 tick 或尖峰附近的短时采样，不先停用小占比来源。", false)
+            ("整体 tick 指标暂未显示持续过载，但有尖峰；核对 worst_windows 并展示采样中主要执行开销与具体路径。长时平均热点不能定位瞬时卡顿，针对热点给可逆优化对照；尖峰归因需慢 tick 或附近短时采样，不先停用小占比来源。", cpu)
         } else {
-            ("整体指标暂未显示持续过载；结合窗口、采样时长与玩家活动说明代表性，避免硬凑优化项。已有证据足够时直接完成诊断。", false)
+            ("整体 tick 指标暂未显示持续过载；仍检查并说明采样中的主要执行开销、占比和具体路径，结合窗口、时长与玩家活动说明代表性。值得优化的路径给可逆对照，未见问题时不硬凑故障。", cpu)
         }
     } else {
         ("症状指标不足或混合：先用窗口区分持续负载与间歇卡顿，再查相关执行路径；不能从总 CPU 或单个最差窗口认定根因。", cpu)
@@ -158,7 +163,11 @@ mod tests {
     fn inspection_respects_symptoms_and_sampling_scope() {
         let normal =
             serde_json::json!({"metrics":{"msptMedian":1.1,"msptP95":1.5,"msptMax":90,"tps1m":20}});
-        assert!(!inspection_plan(ReportKind::Sampler, &normal).1);
+        assert!(inspection_plan(ReportKind::Sampler, &normal).1);
+        let client = serde_json::json!({"platformType":"CLIENT","metrics":normal["metrics"]});
+        let (guidance, inspect) = inspection_plan(ReportKind::Sampler, &client);
+        assert!(inspect);
+        assert!(guidance.contains("Render thread"));
         let slow = serde_json::json!({"metrics":{"msptMedian":110,"tps1m":9}});
         assert!(inspection_plan(ReportKind::Sampler, &slow).1);
         for kind in [ReportKind::Heap, ReportKind::Health, ReportKind::Text] {
