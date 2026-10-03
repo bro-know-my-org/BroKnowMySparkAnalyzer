@@ -31,16 +31,16 @@ pub(crate) fn contains_spark_command(content: &str) -> bool {
                 if contains_command_text(text, TextContext::InlineCode { has_prose }, &rendered) {
                     return true;
                 }
-                rendered.push_str(&text);
+                rendered.push_str(text);
             }
             Event::Text(text) => {
-                if in_code && contains_command_text(&text, TextContext::CodeBlock, &rendered) {
+                if in_code && contains_command_text(text, TextContext::CodeBlock, &rendered) {
                     return true;
                 }
-                rendered.push_str(&text);
+                rendered.push_str(text);
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
-                if contains_command_text(&dest_url, TextContext::Prose, "") {
+                if contains_command_text(dest_url, TextContext::Prose, "") {
                     return true;
                 }
             }
