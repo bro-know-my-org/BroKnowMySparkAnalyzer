@@ -99,6 +99,9 @@ const copy = {
       overview: "报告概览",
       workspace: "分析工作台",
       aiSettings: "AI 设置",
+      webAiTitle: "网页版 AI 使用条件",
+      webAiTip: "获取模型、测试连通性和 AI 分析需要接口允许跨域访问（CORS）。若请求被阻止，请使用支持跨域的接口或桌面版。本地报告解析和图表查看仍可正常使用。",
+      downloadDesktop: "下载桌面版",
       configureAi: "配置模型后即可分析",
       clear: "清空",
       debug: "Debug",
@@ -201,6 +204,9 @@ const copy = {
       overview: "Overview",
       workspace: "Analysis workspace",
       aiSettings: "AI settings",
+      webAiTitle: "Using AI in the browser",
+      webAiTip: "Model discovery, connection tests and AI analysis require an API that allows cross-origin requests (CORS). If requests are blocked, use a CORS-enabled API or the desktop app. Local report parsing and charts remain available.",
+      downloadDesktop: "Download desktop app",
       configureAi: "Configure a model to analyze",
       clear: "Clear",
       debug: "Debug",
@@ -1726,6 +1732,17 @@ const InfoTip = (props: { text: string }) =>
                   <n-button size="small" quaternary @click="aiSettingsOpen = false">{{ t.ui.close }}</n-button>
                 </div>
               </div>
+              <n-alert v-if="adapter.aiTransport === 'browser'" type="warning" :title="t.ui.webAiTitle" class="mt-10">
+                <p>{{ t.ui.webAiTip }}</p>
+                <n-button
+                  tag="a"
+                  href="https://github.com/bro-know-my-org/BroKnowMySparkAnalyzer/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  size="small"
+                  secondary
+                >{{ t.ui.downloadDesktop }}</n-button>
+              </n-alert>
               <n-select :value="providerId" :options="providerOptions" @update:value="applyProvider" />
               <n-input v-model:value="baseUrl" class="mt-10" :placeholder="t.ui.baseUrlPlaceholder" />
               <n-input v-model:value="apiKey" class="mt-10" type="password" show-password-on="click" :placeholder="t.ui.apiKeyPlaceholder" />

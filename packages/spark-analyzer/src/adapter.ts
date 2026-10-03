@@ -87,6 +87,8 @@ export type SavePathOptions = {
 };
 
 export interface SparkAnalyzerAdapter {
+  /** Browser AI requests require the provider to allow cross-origin access. */
+  readonly aiTransport?: "browser" | "native";
   loadReportBytes(bytes: Uint8Array, source: string, hint?: string): Promise<LoadedReport>;
   loadTextReport(text: string, source?: string): Promise<LoadedReport>;
   fetchReport(input: string): Promise<LoadedReport>;

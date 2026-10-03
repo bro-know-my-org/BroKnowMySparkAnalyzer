@@ -63,6 +63,10 @@ const tauriAdapter = createTauriSparkAnalyzerAdapter();
 let wasmAnalyzerPromise: Promise<WasmAnalyzer> | undefined;
 
 export const sparkAnalyzerAdapter: SparkAnalyzerAdapter = {
+  get aiTransport() {
+    return isTauriRuntime() ? "native" : "browser";
+  },
+
   async loadReportBytes(bytes, source, hint = "") {
     if (bytes.byteLength > MAX_WEB_REPORT_BYTES) throw new Error("报告超过 64 MiB 限制");
     if (isTauriRuntime()) {
