@@ -1137,6 +1137,100 @@ fn mentions_any_percent(content: &str) -> bool {
 
 fn mentions_render_source(content: &str, source: &RenderSource, sources: &[RenderSource]) -> bool {
     let lower = content.to_lowercase();
+    if alias_positions(&lower, &source.name).is_empty() {
+        return false;
+    }
+    if !source.paths.is_empty() {
+        let markers = sources
+            .iter()
+            .flat_map(render_path_markers)
+            .collect::<Vec<_>>();
+        return render_path_markers(source).iter().any(|marker| {
+            lower.lines().any(|line| {
+                alias_positions(line, marker).into_iter().any(|start| {
+                    let after = start + marker.len();
+                    let qualified_start = qualified_frame_start(line, start);
+                    if has_conflicting_source_label(line, start, after, source, sources) {
+                        return false;
+                    }
+                    let boundaries = markers
+                        .iter()
+                        .flat_map(|other| {
+                            alias_positions(line, other)
+                                .into_iter()
+                                .map(move |position| (position, other.len()))
+                        })
+                        .chain(
+                            sources
+                                .iter()
+                                .filter(|other| other.name != source.name)
+                                .flat_map(|other| {
+                                    alias_positions(line, &other.name)
+                                        .into_iter()
+                                        .map(move |position| (position, other.name.len()))
+                                }),
+                        )
+                        .filter(|(position, length)| {
+                            position + length <= qualified_start || *position >= after
+                        })
+                        .collect::<Vec<_>>();
+                    let begin = boundaries
+                        .iter()
+                        .filter(|(position, length)| position + length <= start)
+                        .map(|(position, length)| position + length)
+                        .max()
+                        .unwrap_or(0);
+                    let end = boundaries
+                        .iter()
+                        .filter(|(position, _)| *position >= after)
+                        .map(|(position, _)| *position)
+                        .min()
+                        .unwrap_or(line.len());
+                    // Prefer a frame's explicit following percentage over a
+                    // preceding one. A chain without per-frame percentages may
+                    // instead state one percentage at the end of the group.
+                    let before = &line[begin..qualified_start];
+                    let before = before
+                        .rsplit(['。', '；', ';', '→', '\n'])
+                        .next()
+                        .unwrap_or(before);
+                    let preceding_clause = line[..qualified_start]
+                        .rsplit(['。', '；', ';', '→', '\n'])
+                        .next()
+                        .unwrap_or("");
+                    let before = if contains_frame_reference(preceding_clause) {
+                        before
+                            .rsplit_once(['，', ','])
+                            .map(|(_, tail)| tail)
+                            .filter(|tail| !contains_frame_reference(tail))
+                            .unwrap_or("")
+                    } else {
+                        before
+                    };
+                    let following = &line[after..end];
+                    let group = following
+                        .split(['。', '；', ';', '\n', '，', ','])
+                        .next()
+                        .unwrap_or(following);
+                    let following = group.split('→').next().unwrap_or(group);
+                    let direct = following.split('%').next().unwrap_or(following);
+                    let explicit = if contains_frame_reference(direct) && !direct.contains('/') {
+                        None
+                    } else {
+                        extract_percentages(following).first().copied()
+                    };
+                    explicit
+                        .or_else(|| extract_percentages(before).last().copied())
+                        .or_else(|| {
+                            (group.contains('→') && !contains_frame_reference(following))
+                                .then(|| extract_percentages(group).first().copied())
+                                .flatten()
+                        })
+                        .is_some_and(|v| (v - source.percent).abs() <= 0.6)
+                })
+            })
+        });
+    }
     lower.split("\n\n").any(|paragraph| {
         alias_positions(paragraph, &source.name)
             .into_iter()
@@ -1148,27 +1242,119 @@ fn mentions_render_source(content: &str, source: &RenderSource, sources: &[Rende
                     .filter(|position| *position > start)
                     .min()
                     .unwrap_or(paragraph.len());
-                let clause_start = paragraph[..start]
-                    .rfind(['。', '；', ';', '\n'])
-                    .map_or(0, |index| {
-                        index + paragraph[index..].chars().next().unwrap().len_utf8()
-                    });
-                let span = &paragraph[clause_start..end];
                 mentions_percent(&paragraph[start..end], source.percent)
-                    && (source.paths.is_empty()
-                        || source.paths.iter().any(|path| {
-                            let label = path.split(':').next().unwrap_or(path);
-                            let Some((class, method)) = label.rsplit_once('.') else {
-                                return false;
-                            };
-                            let class = class.rsplit('.').next().unwrap_or(class);
-                            // Mixin handler identifiers vary; preserve the class and operation.
-                            let method = method.rsplit('$').next().unwrap_or(method);
-                            span.contains(&class.to_lowercase())
-                                && span.contains(&method.to_lowercase())
-                        }))
             })
     })
+}
+
+fn has_conflicting_source_label(
+    line: &str,
+    start: usize,
+    after: usize,
+    source: &RenderSource,
+    sources: &[RenderSource],
+) -> bool {
+    let before = line[..start]
+        .rsplit(['。', '；', ';', '→', '，', ','])
+        .next()
+        .unwrap_or("");
+    let label = sources
+        .iter()
+        .flat_map(|other| {
+            alias_positions(before, &other.name)
+                .into_iter()
+                .filter(|at| {
+                    before[at + other.name.len()..]
+                        .trim_start()
+                        .starts_with([':', '：'])
+                })
+                .map(move |at| (at, other))
+        })
+        .max_by_key(|(at, _)| *at);
+    if label.is_some_and(|(_, other)| other.name != source.name) {
+        return true;
+    }
+    let following = line[after..]
+        .split(['。', '；', ';', '→', '，', ','])
+        .next()
+        .unwrap_or("");
+    sources
+        .iter()
+        .filter(|other| other.name != source.name)
+        .any(|other| {
+            alias_positions(following, &other.name)
+                .into_iter()
+                .any(|at| {
+                    following[..at].trim_end().ends_with(['(', '（'])
+                        && following[at + other.name.len()..]
+                            .trim_start()
+                            .starts_with([')', '）'])
+                })
+        })
+}
+
+fn qualified_frame_start(line: &str, start: usize) -> usize {
+    line[..start]
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.'))
+        .last()
+        .map_or(start, |(index, _)| index)
+}
+
+fn contains_frame_reference(content: &str) -> bool {
+    content.match_indices('.').any(|(index, _)| {
+        content[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+            && content[index + 1..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '$')
+    })
+}
+
+fn render_path_markers(source: &RenderSource) -> Vec<String> {
+    source
+        .paths
+        .iter()
+        .flat_map(|path| {
+            let label = path.split(':').next().unwrap_or(path);
+            let Some((class, method)) = label.rsplit_once('.') else {
+                return Vec::new();
+            };
+            let class = class.rsplit('.').next().unwrap_or(class);
+            // Keep the original method and allow stable Mixin operation names.
+            let operation = if method.starts_with("handler$")
+                || method.starts_with("wrapOperation$")
+                || method.starts_with("wrapMethod$")
+            {
+                method.rsplit('$').next().unwrap_or(method)
+            } else {
+                method
+            };
+            let mut markers = vec![
+                format!("{class}.{method}").to_lowercase(),
+                format!("{class}.{operation}").to_lowercase(),
+            ];
+            if operation != method {
+                let segments = method.split('$').collect::<Vec<_>>();
+                if segments.len() >= 3 {
+                    markers.push(
+                        format!(
+                            "{class}.{}${}${}",
+                            segments[0],
+                            segments[segments.len() - 2],
+                            operation
+                        )
+                        .to_lowercase(),
+                    );
+                }
+            }
+            markers
+        })
+        .collect()
 }
 
 fn mentions_percent(content: &str, expected: f64) -> bool {
@@ -1554,12 +1740,38 @@ mod tests {
             validate_final("Sodium 地形约 20%，Voxy 渲染约 10%。", &state),
             Some(FinalProblem::OmitsRenderSource)
         );
+        assert_eq!(
+            validate_final("SodiumRenderer.drawChunkLayer 20.1%（Sodium）；VoxyRenderer.handler$voxy$injectRender 10.4%（Voxy）。", &state),
+            None
+        );
+        assert_eq!(
+            validate_final("SodiumRenderer.drawChunkLayer 20.1%（Sodium），VoxyRenderer.injectRender 10.4%（Voxy）。", &state),
+            None
+        );
+        assert_eq!(
+            validate_final("Sodium: SodiumRenderer.drawChunkLayer 20.1%，VoxyRenderer.injectRender 10.4%（Voxy）。", &state),
+            None
+        );
+        assert_eq!(
+            validate_final("Sodium 20.1% example.SodiumRenderer.drawChunkLayer；Voxy 10.4% example.sodium.VoxyRenderer.handler$voxy$injectRender。", &state),
+            None
+        );
+        assert_eq!(
+            validate_final("Sodium 侧 SodiumRenderer.drawChunkLayer/RenderSectionManager.renderLayer 约 20.1%；Voxy 侧 VoxyRenderer.handler$voxy$injectRender → VoxyRenderSystem.renderOpaque → AbstractRenderPipeline.runPipeline 约 10.4%。", &state),
+            None
+        );
         for separator in ["；", "，"] {
             let swapped = format!("Sodium 约 10%，SodiumRenderer.drawChunkLayer{separator}Voxy 约 20%，VoxyRenderer.injectRender。");
             assert_eq!(
                 validate_final(&swapped, &state),
                 Some(FinalProblem::OmitsRenderSource)
             );
+        }
+        for reversed in [
+            "Voxy: SodiumRenderer.drawChunkLayer 20.1%；Sodium: VoxyRenderer.injectRender 10.4%。",
+            "SodiumRenderer.drawChunkLayer（Voxy）20.1%；VoxyRenderer.injectRender（Sodium）10.4%。",
+        ] {
+            assert_eq!(validate_final(reversed, &state), Some(FinalProblem::OmitsRenderSource));
         }
         let mut mixed = EvidenceState::default();
         update(
@@ -1583,6 +1795,51 @@ mod tests {
             validate_final("Mod 渲染占比约 12%，具体路径尚未提供。", &missing_paths),
             None
         );
+    }
+
+    #[test]
+    fn render_frame_percentage_can_precede_its_source_name() {
+        let state = EvidenceState {
+            major_render_sources: vec![RenderSource {
+                name: "neoforge".into(),
+                percent: 14.146,
+                paths: vec!["net.neoforged.neoforge.client.gui.GuiLayerManager.render".into()],
+            }],
+            ..Default::default()
+        };
+        for evidence in [
+            "GuiLayerManager.render：14.15%（NeoForge）。",
+            "GuiLayerManager.render（NeoForge）14.15%。",
+            "14.15% GuiLayerManager.render（NeoForge）。",
+            "NeoForge 14.15% net.neoforged.neoforge.client.gui.GuiLayerManager.render。",
+            "| 14.15% | GuiLayerManager.render | NeoForge |",
+            "- GUI 路径：GuiLayerManager.render 14.15%\n  来源：NeoForge。",
+            "NeoForge GuiLayerManager.render\n  14.15%。",
+            "- HUD 层线：Gui.render 14.2% → GuiLayerManager.render 14.15% → EventBus.post 12.42%。NeoForge 帧是事件分发层，含下游开销。",
+            "- 界面层线：Gui.render 14.2% → GuiLayerManager.render 14.15% → GuiLayerManager.renderInner 12.40%；其中 NeoForge 帧是分发层。",
+        ] {
+            assert_eq!(validate_final(&format!("# 判断依据\n{evidence}"), &state), None, "{evidence}");
+        }
+        for evidence in [
+            "NeoForge GuiLayerManager.render 24.15%。",
+            "NeoForge OtherFrame.render 14.15%, GuiLayerManager.render 24.15%。",
+            "NeoForge OtherFrame.render 14.15%, GuiLayerManager.render。",
+            "NeoForge OtherFrame.render 14.15% GuiLayerManager.render。",
+            "NeoForge GuiLayerManager.render OtherFrame.render 14.15%。",
+            "NeoForge 14.15%，GuiLayerManager.renderInner 14.15%。",
+            "NeoForge 14.15%。GuiLayerManager.render 24.15%。",
+            "NeoForge：GuiLayerManager.render 24.15% → OtherFrame.render 14.15%。",
+            "NeoForge：OtherFrame.render 14.15% → GuiLayerManager.render 24.15%。",
+            "NeoForge 14.15%，没有调用路径。",
+            "NeoForge GuiLayerManager.render\n\n14.15%。",
+            "- NeoForge GuiLayerManager.render\n- OtherFrame.render 14.15%。",
+        ] {
+            assert_eq!(
+                validate_final(&format!("# 判断依据\n{evidence}"), &state),
+                Some(FinalProblem::OmitsRenderSource),
+                "{evidence}"
+            );
+        }
     }
 
     #[test]

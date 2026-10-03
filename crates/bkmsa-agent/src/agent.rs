@@ -230,17 +230,6 @@ where
 
         if let Some(problem) = evidence::validate_final(&content, &evidence_state) {
             validation_attempts = validation_attempts.saturating_add(1);
-            if validation_attempts > options.validation_round_limit || round >= options.max_rounds {
-                return Ok(AgentResult {
-                    diagnosis:
-                        "证据校验失败，未返回可能误导的诊断。请重试分析或增加可用于修正的轮数。"
-                            .into(),
-                    traces,
-                    used_tools: used_tools.into_iter().collect(),
-                    rounds: round,
-                    reached_round_limit: round >= options.max_rounds,
-                });
-            }
             let correction = problem.correction(&evidence_state);
             emit(
                 &mut traces,
@@ -252,6 +241,17 @@ where
                     content: correction.clone(),
                 },
             );
+            if validation_attempts > options.validation_round_limit || round >= options.max_rounds {
+                return Ok(AgentResult {
+                    diagnosis:
+                        "证据校验失败，未返回可能误导的诊断。请重试分析或增加可用于修正的轮数。"
+                            .into(),
+                    traces,
+                    used_tools: used_tools.into_iter().collect(),
+                    rounds: round,
+                    reached_round_limit: round >= options.max_rounds,
+                });
+            }
             messages.push(ChatMessage::assistant(content));
             messages.push(ChatMessage::user(format!(
                 "{correction}\n重新输出最终 Markdown，并保持 # 结论、# 优先处理、# 判断依据、# 复测与补采。保留具体处理方案，避免重复证据或免责声明。"
@@ -1293,6 +1293,11 @@ mod tests {
         assert!(result.diagnosis.contains("校验失败"));
         assert!(!crate::commands::contains_spark_command(&result.diagnosis));
         assert!(result.reached_round_limit);
+        assert_eq!(
+            result.traces.last().unwrap().title,
+            "Evidence validation blocked"
+        );
+        assert_eq!(result.traces.last().unwrap().round, result.rounds);
     }
 
     #[tokio::test]
