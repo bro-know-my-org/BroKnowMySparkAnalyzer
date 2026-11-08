@@ -10,11 +10,7 @@
 
 ## 发布资产
 
-推送 tag 前必须先把 workspace 版本更新为目标版本。`Publish SDK Packages` workflow 会按依赖顺序发布 `bkmsa-core`、`bkmsa-agent`、`bkmsa-tauri`、`bkmsa-cli`，然后发布同版本的 `@bro-know-my/spark-analyzer`。Actions secrets 只需要：
-
-```text
-CARGO_REGISTRY_TOKEN  crates.io 发布 token
-```
+推送 tag 前必须先把 workspace 版本更新为目标版本。`Publish SDK Packages` workflow 会按依赖顺序发布 `bkmsa-core`、`bkmsa-agent`、`bkmsa-tauri`、`bkmsa-cli`，然后发布同版本的 `@bro-know-my/spark-analyzer`。crates.io 使用 Trusted Publishing（GitHub OIDC），无需 `CARGO_REGISTRY_TOKEN` secret。四个 crate 都需信任 owner `bro-know-my-org`、仓库 `BroKnowMySparkAnalyzer`、调用方 workflow `release.yml`，Environment 留空。发布 job 在打包检查后通过官方 `rust-lang/crates-io-auth-action` 获取短期 token。
 
 npm 使用 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) 的 OIDC 身份发布，不需要 `NPM_TOKEN`。在 npm 包的 Settings → Trusted Publisher 中选择 GitHub Actions，填写：
 
@@ -28,7 +24,7 @@ npm 使用 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) 的 O
 
 信任的是调用方 `release.yml`，不是可复用工作流 `publish-npm.yml`。两层工作流都已授予 `id-token: write`；发布任务使用 npm 11.19.0。新建信任配置时需明确允许直接发布，否则只允许暂存发布。
 
-首次 `cargo publish` 会自动创建 crate，不需要在 crates.io 手动建包。首次发布后可以把 token 收紧到这四个 crate，或迁移到 crates.io Trusted Publishing。crate 版本不可覆盖；workflow 支持安全重跑并跳过已经存在的同版本包。
+新 crate 首次发布仍需 API token；现有四个 crate 已配置 Trusted Publishing。crate 版本不可覆盖；workflow 支持安全重跑并跳过已经存在的同版本包。
 
 推送到 `master` 会在 WASM smoke test 和 Web 构建成功后更新 GitHub Pages。推送严格的 `vX.Y.Z` tag 会先校验已提交版本并运行完整 CI，再构建 Windows、Linux 和 macOS 桌面包及原生 CLI；随后发布 Rust/npm SDK、部署网页并创建 GitHub Release。
 

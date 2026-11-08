@@ -259,8 +259,6 @@ jobs:
     uses: ./.github/workflows/publish-npm.yml
     with:
       version: ${{ needs.prepare.outputs.version }}
-    secrets:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     permissions:
       contents: read
       id-token: write
@@ -366,8 +364,6 @@ jobs:
     with:
       version: ${{ needs.recover-prepare.outputs.version }}
       ref: ${{ needs.recover-prepare.outputs.sha }}
-    secrets:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     permissions:
       contents: read
       id-token: write
