@@ -31,7 +31,7 @@ Minecraft [spark](https://spark.lucko.me/) 报告分析工具，提供网页版�
 
 **2. 导入报告**
 
-从 spark 导出文件，或复制报告链接 / key。支持 `.sparkprofile`、`.sparkheap`、`.sparkhealth`、原始 health protobuf 和文本日志。导入后即可查看报告数据，无需配置 AI 服务。
+从 spark 导出文件，或复制报告链接 / key。文件导入支持 `.sparkprofile`、`.sparkheap`、`.sparkhealth` 和原始 health protobuf。文本日志请粘贴到网页版或桌面版的文本输入框。导入后即可查看报告数据，无需配置 AI 服务。
 
 **3. 按需启用 AI**
 
@@ -99,7 +99,7 @@ Available data depends on the report type and what was captured.
 
 **2. Import a report**
 
-Export a file from spark or copy a report link / key. Supported files include `.sparkprofile`, `.sparkheap`, `.sparkhealth`, raw health protobuf, and text logs. You can explore the report without configuring an AI provider.
+Export a file from spark or copy a report link / key. Supported files include `.sparkprofile`, `.sparkheap`, `.sparkhealth`, and raw health protobuf. Paste text logs into the text input in the web or desktop app. You can explore the report without configuring an AI provider.
 
 **3. Enable AI when needed**
 
